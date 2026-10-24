@@ -380,7 +380,16 @@ def _osm_api_map_xml_to_elements(xml_payload):
     elements = list(node_elements)
     for way in root.findall("way"):
         tags = {tag.attrib.get("k", ""): tag.attrib.get("v", "") for tag in way.findall("tag")}
-        if not any(key in tags for key in ("highway", "building", "landuse", "natural", "waterway", "water")):
+        requested_landuse = tags.get("landuse") in {
+            "residential", "commercial", "industrial", "retail", "village", "farmyard", "reservoir"
+        }
+        requested_natural = tags.get("natural") in {"water", "coastline"}
+        requested_waterway = tags.get("waterway") in {"riverbank", "river", "canal", "stream"}
+        requested_water = tags.get("water") in {"lake", "reservoir", "pond", "basin"}
+        if not (
+            "highway" in tags or "building" in tags
+            or requested_landuse or requested_natural or requested_waterway or requested_water
+        ):
             continue
         geometry = []
         for nd in way.findall("nd"):
