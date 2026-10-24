@@ -10,7 +10,7 @@ from pathlib import Path as FilePath
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from scipy.sparse.csgraph import dijkstra
+from scipy.sparse.csgraph import dijkstra, maximum_flow
 from scipy.ndimage import binary_dilation, distance_transform_edt, zoom, label
 from matplotlib.path import Path as MplPath
 
@@ -19,6 +19,7 @@ TREE = ast.parse(SOURCE_FILE.read_text(encoding="utf-8"))
 FUNCTION_NAMES = {
     "draw_thick_line",
     "_local_raster_inventory_signature",
+    "_solve_cropped_mincut",
     "_load_local_geotiff_grid",
     "load_local_dem_grid",
     "load_local_worldcover_grid",
@@ -36,6 +37,7 @@ def make_namespace(shape=(9, 9)):
         "np": np,
         "sp": sp,
         "dijkstra": dijkstra,
+        "maximum_flow": maximum_flow,
         "binary_dilation": binary_dilation,
         "distance_transform_edt": distance_transform_edt,
         "zoom": zoom,
@@ -281,6 +283,33 @@ def test_local_raster_inventory_signature_changes_when_tiles_change(tmp_path):
     dem_tile.write_bytes(b"dem-v2-content")
     signature_updated = ns["_local_raster_inventory_signature"]()
     assert signature_updated != signature_both
+
+
+def test_cropped_mincut_returns_a_valid_source_side_partition():
+    shape = (9, 9)
+    ns = make_namespace(shape)
+    costs = np.ones(shape, dtype=np.float32)
+    # Make a cheap vertical cut so the max-flow/min-cut primitive has a small,
+    # deterministic synthetic case independent of real GIS data.
+    costs[:, 4] = 0.25
+    source = np.zeros(shape, dtype=bool)
+    source[4, 2] = True
+    sink = np.zeros(shape, dtype=bool)
+    sink[0, :] = True
+    sink[-1, :] = True
+    sink[:, 0] = True
+    sink[:, -1] = True
+
+    partition, sink_reached = ns["_solve_cropped_mincut"](
+        costs, source, sink, dx_m=30.0, dy_m=30.0,
+        diag_scale=float(np.hypot(30.0, 30.0) / 30.0)
+    )
+
+    assert sink_reached is False
+    assert partition.shape == shape
+    assert partition[source].all()
+    assert not partition[sink].any()
+    assert partition.any()
 
 
 def test_topology_verifier_treats_water_as_nonburnable():
