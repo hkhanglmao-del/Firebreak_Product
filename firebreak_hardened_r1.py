@@ -351,6 +351,52 @@ def fetch_api_dem_grid(lat_center, lon_center, grid_n=20):
     return dem_540[:GRID_SHAPE[0], :GRID_SHAPE[1]]
 
 
+def _osm_api_map_xml_to_elements(xml_payload):
+    """Chuyển XML của endpoint OSM chính thức sang cấu trúc dữ liệu mà rasterizer sử dụng."""
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(xml_payload)
+    if root.tag.split("}")[-1] != "osm":
+        raise ValueError("Endpoint bản đồ OSM trả về XML không có thẻ gốc <osm>.")
+
+    node_lookup = {}
+    node_elements = []
+    for node in root.findall("node"):
+        node_id = node.attrib.get("id")
+        if node_id is None:
+            continue
+        tags = {tag.attrib.get("k", ""): tag.attrib.get("v", "") for tag in node.findall("tag")}
+        item = {
+            "type": "node",
+            "id": int(node_id),
+            "lat": float(node.attrib["lat"]),
+            "lon": float(node.attrib["lon"]),
+            "tags": tags,
+        }
+        node_lookup[node_id] = item
+        if "place" in tags:
+            node_elements.append(item)
+
+    elements = list(node_elements)
+    for way in root.findall("way"):
+        tags = {tag.attrib.get("k", ""): tag.attrib.get("v", "") for tag in way.findall("tag")}
+        if not any(key in tags for key in ("highway", "building", "landuse", "natural", "waterway", "water")):
+            continue
+        geometry = []
+        for nd in way.findall("nd"):
+            node = node_lookup.get(nd.attrib.get("ref", ""))
+            if node is not None:
+                geometry.append({"lat": node["lat"], "lon": node["lon"]})
+        if len(geometry) >= 2:
+            elements.append({
+                "type": "way",
+                "id": int(way.attrib.get("id", "0")),
+                "tags": tags,
+                "geometry": geometry,
+            })
+    return {"elements": elements}
+
+
 def fetch_api_osm_landscape(lat_center, lon_center):
     """
     Truy vấn trực tiếp 100% Đường giao thông & Khu dân cư từ OpenStreetMap Overpass API.
@@ -364,6 +410,7 @@ def fetch_api_osm_landscape(lat_center, lon_center):
     [out:json][timeout:25];
     (
       way["highway"~"motorway|trunk|primary|secondary|tertiary|unclassified|residential|service|track"]({south},{west},{north},{east});
+      way["building"]({south},{west},{north},{east});
       way["landuse"~"residential|commercial|industrial|retail|village|farmyard"]({south},{west},{north},{east});
       way["natural"="water"]({south},{west},{north},{east});
       way["natural"="coastline"]({south},{west},{north},{east});
@@ -384,23 +431,43 @@ def fetch_api_osm_landscape(lat_center, lon_center):
     used_mirror = ""
     last_err = None
 
-    for mirror in OVERPASS_MIRRORS:
-        try:
-            resp = requests.post(mirror, data={"data": query}, headers=headers, timeout=20)
-            if resp.status_code == 429:
-                last_err = f"429 Too Many Requests ({mirror})"
-                time.sleep(0.4)
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            used_mirror = mirror.split("//")[1].split("/")[0]
-            break
-        except Exception as e:
-            last_err = e
-            continue
+    # Ưu tiên endpoint bản đồ OSM chính thức trước; endpoint này trả về các way
+    # cùng node tham chiếu trong AOI giới hạn nên có thể thay thế Overpass.
+    try:
+        map_resp = requests.get(
+            "https://api.openstreetmap.org/api/0.6/map",
+            params={"bbox": f"{west},{south},{east},{north}"},
+            headers=headers,
+            timeout=15,
+        )
+        map_resp.raise_for_status()
+        data = _osm_api_map_xml_to_elements(map_resp.content)
+        used_mirror = "api.openstreetmap.org/map"
+    except Exception as e:
+        last_err = e
+        data = None
 
     if data is None:
-        raise RuntimeError(f"Tất cả máy chủ Overpass API hiện đang bận: {last_err}")
+        for mirror in OVERPASS_MIRRORS:
+            try:
+                resp = requests.post(mirror, data={"data": query}, headers=headers, timeout=10)
+                if resp.status_code == 429:
+                    last_err = f"429 Too Many Requests ({mirror})"
+                    time.sleep(0.4)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                used_mirror = mirror.split("//")[1].split("/")[0]
+                break
+            except Exception as e:
+                last_err = e
+                continue
+
+    if data is None:
+        raise RuntimeError(
+            "Endpoint bản đồ OSM chính thức và mọi máy chủ Overpass đều không khả dụng: "
+            f"{last_err}"
+        )
 
     road_mask = np.zeros(GRID_SHAPE, dtype=bool)
     building_mask = np.zeros(GRID_SHAPE, dtype=bool)
@@ -551,7 +618,7 @@ def fetch_api_osm_landscape(lat_center, lon_center):
                         (r0, c0), (r1, c1) = clipped
                         draw_thick_line(water_mask, r0, c0, r1, c1, thickness=1)
 
-            elif "landuse" in tags and len(pts) >= 3:
+            elif ("landuse" in tags or "building" in tags) and len(pts) >= 3:
                 poly_rc = clip_polygon_to_grid(pts)
                 if len(poly_rc) < 3:
                     continue
@@ -1164,6 +1231,46 @@ def compute_backcasted_ignition_seeds(
     return est_origin_r, est_origin_c, valid_seeds
 
 
+def _build_single_ignition_mask(
+    valid_seeds, origin_row, origin_col, initial_radius, env, blocked_mask=None
+):
+    """Tạo một vùng khởi phát duy nhất; các vị trí do sai số tọa độ là giả thuyết thay thế."""
+    if not valid_seeds:
+        raise ValueError("Không có ô khởi phát hợp lệ.")
+
+    fuel = np.asarray(env["fuel_matrix"], dtype=np.float32)
+    road = np.asarray(env["road_mask"], dtype=bool)
+    building = np.asarray(env["building_mask"], dtype=bool)
+    water = np.asarray(env.get("water_mask", np.zeros_like(road)), dtype=bool)
+    burnable = (fuel > 0.0) & (~road) & (~building) & (~water)
+    rows, cols = fuel.shape
+    seed = min(
+        ((int(r), int(c)) for r, c in valid_seeds),
+        key=lambda rc: ((rc[0] - float(origin_row)) ** 2 + (rc[1] - float(origin_col)) ** 2, rc[0], rc[1]),
+    )
+    sr, sc = seed
+    blocked = np.zeros_like(burnable) if blocked_mask is None else np.asarray(blocked_mask, dtype=bool)
+    if blocked.shape != burnable.shape:
+        raise ValueError("blocked_mask phải có cùng kích thước với lưới nhiên liệu.")
+    burnable &= ~blocked
+
+    ignition = np.zeros_like(burnable)
+    radius = max(0, int(initial_radius))
+    for dr in range(-radius, radius + 1):
+        for dc in range(-radius, radius + 1):
+            nr, nc = sr + dr, sc + dc
+            if 0 <= nr < rows and 0 <= nc < cols and dr * dr + dc * dc <= radius * radius:
+                if burnable[nr, nc]:
+                    ignition[nr, nc] = True
+
+    if not np.any(ignition):
+        raise ValueError(
+            "Vùng khởi phát đã chọn không còn ô cháy được sau khi áp dụng mặt nạ "
+            "đường, công trình, mặt nước và vùng loại trừ."
+        )
+    return ignition, seed
+
+
 def compute_continuous_fire_arrival_field(
     current_fire_mask, env, wind_speed, wind_deg, humidity, prcp, temp, p_base, allow_spotting
 ):
@@ -1568,19 +1675,12 @@ def run_full_simulation_and_mincut(
     grid_t0[env["fuel_matrix"] == 0.0] = STATE_EMPTY
     grid_t0[env["road_mask"]] = STATE_EMPTY
 
-    for sr, sc in valid_seeds:
-        for dr in range(-initial_radius, initial_radius + 1):
-            for dc in range(-initial_radius, initial_radius + 1):
-                nr, nc = sr + dr, sc + dc
-                if 0 <= nr < GRID_SHAPE[0] and 0 <= nc < GRID_SHAPE[1]:
-                    if dr**2 + dc**2 <= initial_radius**2:
-                        if (
-                            env["fuel_matrix"][nr, nc] > 0.0
-                            and not env["road_mask"][nr, nc]
-                            and not outer_guard_band[nr, nc]
-                        ):
-                            grid_t0[nr, nc] = STATE_BURNING
-                            burn_time_t0[nr, nc] = 1
+    initial_ignition_mask, chosen_ignition_seed = _build_single_ignition_mask(
+        valid_seeds, est_origin_r, est_origin_c, initial_radius, env,
+        blocked_mask=outer_guard_band
+    )
+    grid_t0[initial_ignition_mask] = STATE_BURNING
+    burn_time_t0[initial_ignition_mask] = 1
 
     if not np.any(grid_t0 == STATE_BURNING):
         # Never silently relocate the ignition to an arbitrary burnable cell.
@@ -2104,6 +2204,8 @@ def run_full_simulation_and_mincut(
     gc.collect()
 
     return {
+        "chosen_ignition_seed_rc": tuple(map(int, chosen_ignition_seed)),
+        "initial_burning_cells": int(np.sum(history_uncontrolled[0] == STATE_BURNING)),
         "history_uncontrolled": history_uncontrolled,
         "history_controlled": history_controlled,
         "reduced_burn_mask": reduced_burn_mask,
