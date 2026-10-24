@@ -1,0 +1,1062 @@
+--- firebreak_selective_merge_download(1).py (original)
++++ firebreak_hardened_r1_final.py (revised)
+@@ -1,5 +1,6 @@
+ import gc
+ import time
++from pathlib import Path as FilePath
+ import requests
+ import numpy as np
+ import pandas as pd
+@@ -23,6 +24,11 @@
+ )
+ 
+ GRID_SHAPE = (540, 540)
++# Optional local research data. See HUONG_DAN_DU_LIEU_VA_KIEM_THU.md for expected files and provenance.
++APP_DIR = FilePath(__file__).resolve().parent
++DATA_DIR = APP_DIR / "data"
++LOCAL_DEM_DIR = DATA_DIR / "dem"
++LOCAL_WORLDCOVER_DIR = DATA_DIR / "worldcover"
+ LAT_SPAN_DEG = 0.15          # Khung không gian vĩ độ: 0.15 độ (~16.6 km)
+ LON_SPAN_DEG = 0.15          # Khung không gian kinh độ: 0.15 độ
+ NOMINAL_PIXEL_M = 30.0       # Kích thước pixel danh nghĩa: 30m
+@@ -70,7 +76,7 @@
+ 
+ 
+ # ==============================================================================
+-# TẦNG 1: KẾT NỐI TRỰC TIẾP 100% API TRÊN WEB (KHÔNG LƯU FILE Ổ CỨNG)
++# TẦNG 1: DỮ LIỆU ĐỊA LÝ, ƯU TIÊN GEOTIFF CỤC BỘ VÀ CACHE BỀN
+ # ==============================================================================
+ def compute_projected_pixel_scales(lat_center):
+     """Tính kích thước thực (mét) của 1 pixel theo vĩ độ trên hệ quy chiếu WGS84."""
+@@ -80,6 +86,122 @@
+     dx_m = (LON_SPAN_DEG * meters_per_deg_lon) / GRID_SHAPE[1]
+     pixel_area_ha = (dy_m * dx_m) / 10000.0
+     return float(dy_m), float(dx_m), float(pixel_area_ha)
++
++
++def _load_local_geotiff_grid(folder, lat_center, lon_center, categorical=False, required_filename_tokens=None):
++    """Reproject local GeoTIFF tiles covering the requested AOI to GRID_SHAPE.
++
++    Returns (grid, valid_mask, files_used). Missing local files are not an error;
++    partial coverage is returned explicitly so callers can fail closed where needed.
++    The source tiles are never modified.
++    """
++    folder = FilePath(folder)
++    paths = sorted(set(folder.glob("*.tif")) | set(folder.glob("*.tiff"))) if folder.exists() else []
++    if required_filename_tokens:
++        tokens = tuple(str(token).casefold() for token in required_filename_tokens)
++        paths = [path for path in paths if all(token in path.name.casefold() for token in tokens)]
++    if not paths:
++        return None, None, []
++
++    try:
++        import rasterio
++        from rasterio.transform import from_bounds
++        from rasterio.warp import Resampling, reproject, transform_bounds
++    except ImportError as exc:
++        raise RuntimeError(
++            "Có GeoTIFF trong thư mục dữ liệu nhưng thiếu rasterio. Cài bằng: pip install rasterio"
++        ) from exc
++
++    south, north = lat_center - LAT_SPAN_DEG / 2.0, lat_center + LAT_SPAN_DEG / 2.0
++    west, east = lon_center - LON_SPAN_DEG / 2.0, lon_center + LON_SPAN_DEG / 2.0
++    rows, cols = GRID_SHAPE
++    dst_transform = from_bounds(west, south, east, north, cols, rows)
++    dtype = np.uint16 if categorical else np.float32
++    fill_value = 0 if categorical else np.nan
++    out = np.full(GRID_SHAPE, fill_value, dtype=dtype)
++    valid = np.zeros(GRID_SHAPE, dtype=bool)
++    used = []
++
++    for path in paths:
++        try:
++            with rasterio.open(path) as ds:
++                if ds.count < 1 or ds.crs is None:
++                    continue
++                b = transform_bounds(ds.crs, "EPSG:4326", *ds.bounds, densify_pts=11)
++                if b[2] <= west or b[0] >= east or b[3] <= south or b[1] >= north:
++                    continue
++                tmp = np.full(GRID_SHAPE, fill_value, dtype=dtype)
++                reproject(
++                    source=rasterio.band(ds, 1),
++                    destination=tmp,
++                    src_transform=ds.transform,
++                    src_crs=ds.crs,
++                    src_nodata=ds.nodata,
++                    dst_transform=dst_transform,
++                    dst_crs="EPSG:4326",
++                    dst_nodata=fill_value,
++                    resampling=Resampling.nearest if categorical else Resampling.bilinear,
++                )
++                tmp_valid = (tmp != 0) if categorical else np.isfinite(tmp)
++                take = tmp_valid & (~valid)
++                out[take] = tmp[take]
++                valid |= tmp_valid
++                used.append(path.name)
++        except Exception as exc:
++            raise RuntimeError(f"Không đọc được GeoTIFF {path.name}: {exc}") from exc
++
++    if not used or not np.any(valid):
++        return None, None, []
++    return out, valid, used
++
++
++def load_local_dem_grid(lat_center, lon_center, water_mask):
++    """Load local high-resolution DEM tiles; only water may have nodata gaps."""
++    dem, valid, used = _load_local_geotiff_grid(
++        LOCAL_DEM_DIR, lat_center, lon_center, categorical=False
++    )
++    if dem is None:
++        return None, None
++    missing_land = (~valid) & (~np.asarray(water_mask, dtype=bool))
++    if np.any(missing_land):
++        pct = 100.0 * float(np.mean(valid))
++        raise RuntimeError(
++            f"DEM cục bộ chỉ phủ {pct:.1f}% lưới và còn ô thiếu ngoài mặt nước. "
++            f"Hãy bổ sung các tile phủ kín khung bản đồ trong {LOCAL_DEM_DIR}."
++        )
++    if np.any(~valid):
++        # DEM nodata over water is not terrain evidence; fill only for smooth display/gradient
++        # calculations. Water itself is non-burnable and excluded from fire-travel graphs.
++        nearest = distance_transform_edt(~valid, return_distances=False, return_indices=True)
++        dem[~valid] = dem[tuple(nearest[:, ~valid])]
++    return dem.astype(np.float32), "GeoTIFF cục bộ: " + ", ".join(used)
++
++
++def load_local_worldcover_grid(lat_center, lon_center, water_mask):
++    """Load ESA WorldCover categorical codes; reject incomplete land coverage."""
++    classes, valid, used = _load_local_geotiff_grid(
++        LOCAL_WORLDCOVER_DIR, lat_center, lon_center, categorical=True,
++        required_filename_tokens=("2021", "v200", "map")
++    )
++    if classes is None:
++        if LOCAL_WORLDCOVER_DIR.exists() and any(
++            path.suffix.casefold() in {".tif", ".tiff"} for path in LOCAL_WORLDCOVER_DIR.iterdir()
++        ):
++            raise RuntimeError(
++                f"Không tìm thấy tile WorldCover 2021 v200 lớp Map phủ vùng bản đồ trong {LOCAL_WORLDCOVER_DIR}. "
++                "Chỉ đặt các GeoTIFF lớp Map đúng phiên bản vào thư mục này; không dùng InputQuality."
++            )
++        return None, None, "", 0.0
++    water = np.asarray(water_mask, dtype=bool) | (classes == 80)
++    land_domain = ~water
++    coverage = float(np.mean(valid[land_domain])) * 100.0 if np.any(land_domain) else 100.0
++    if coverage < 99.0:
++        raise RuntimeError(
++            f"ESA WorldCover chỉ phủ {coverage:.1f}% các ô không được nhận diện là nước. "
++            f"Hãy thêm đủ tile 10 m liên quan vào {LOCAL_WORLDCOVER_DIR}; "
++            "các ô NoData không được âm thầm coi là rừng."
++        )
++    return classes.astype(np.uint16), water, "ESA WorldCover 2021 v200: " + ", ".join(used), coverage
+ 
+ 
+ def _largest_connected_component(mask, reference_mask=None):
+@@ -243,6 +365,11 @@
+     (
+       way["highway"~"motorway|trunk|primary|secondary|tertiary|unclassified|residential|service|track"]({south},{west},{north},{east});
+       way["landuse"~"residential|commercial|industrial|retail|village|farmyard"]({south},{west},{north},{east});
++      way["natural"="water"]({south},{west},{north},{east});
++      way["natural"="coastline"]({south},{west},{north},{east});
++      way["waterway"~"riverbank|river|canal|stream"]({south},{west},{north},{east});
++      way["landuse"="reservoir"]({south},{west},{north},{east});
++      way["water"~"lake|reservoir|pond|basin"]({south},{west},{north},{east});
+       node["place"~"city|town|village|hamlet|isolated_dwelling|suburb"]({south},{west},{north},{east});
+     );
+     out geom;
+@@ -277,6 +404,9 @@
+ 
+     road_mask = np.zeros(GRID_SHAPE, dtype=bool)
+     building_mask = np.zeros(GRID_SHAPE, dtype=bool)
++    water_mask = np.zeros(GRID_SHAPE, dtype=bool)
++    coastline_mask = np.zeros(GRID_SHAPE, dtype=bool)
++    coastline_water_seeds = np.zeros(GRID_SHAPE, dtype=bool)
+ 
+     def latlon_to_rc(lat, lon):
+         """Map WGS84 coordinates to continuous row/column coordinates; do not clamp."""
+@@ -375,6 +505,52 @@
+                     (r0, c0), (r1, c1) = clipped
+                     draw_thick_line(road_mask, r0, c0, r1, c1, thickness=thick)
+ 
++            elif tags.get("natural") == "coastline":
++                # OSM coastline direction convention: land left, water right.
++                for i in range(len(pts) - 1):
++                    clipped = clip_segment_to_grid(pts[i], pts[i + 1])
++                    if clipped is None:
++                        continue
++                    (r0, c0), (r1, c1) = clipped
++                    draw_thick_line(coastline_mask, r0, c0, r1, c1, thickness=0)
++                    dr, dc = r1 - r0, c1 - c0
++                    norm = max(float(np.hypot(dr, dc)), 1e-6)
++                    # In row/column coordinates, the right-hand normal is (dc, -dr).
++                    sr = int(round((r0 + r1) / 2.0 + 4.0 * dc / norm))
++                    sc = int(round((c0 + c1) / 2.0 - 4.0 * dr / norm))
++                    if 0 <= sr < rows and 0 <= sc < cols:
++                        coastline_water_seeds[sr, sc] = True
++
++            elif (tags.get("natural") == "water"
++                  or tags.get("waterway") == "riverbank"
++                  or tags.get("landuse") == "reservoir"
++                  or tags.get("water") in {"lake", "reservoir", "pond", "basin"}):
++                # Closed water polygons are preferred; open mapped water features are rasterized
++                # conservatively as a narrow non-burnable corridor.
++                if len(pts) >= 3 and (
++                    np.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) <= 0.5
++                ):
++                    poly_rc = clip_polygon_to_grid(pts)
++                    if len(poly_rc) >= 3:
++                        min_r = max(0, int(np.floor(poly_rc[:, 0].min())))
++                        max_r = min(rows - 1, int(np.ceil(poly_rc[:, 0].max())))
++                        min_c = max(0, int(np.floor(poly_rc[:, 1].min())))
++                        max_c = min(cols - 1, int(np.ceil(poly_rc[:, 1].max())))
++                        if max_r >= min_r and max_c >= min_c:
++                            rr, cc = np.meshgrid(
++                                np.arange(min_r, max_r + 1), np.arange(min_c, max_c + 1), indexing="ij"
++                            )
++                            grid_pts = np.vstack((rr.ravel(), cc.ravel())).T
++                            inside = Path(poly_rc).contains_points(grid_pts).reshape(rr.shape)
++                            water_mask[min_r:max_r + 1, min_c:max_c + 1] |= inside
++                else:
++                    for i in range(len(pts) - 1):
++                        clipped = clip_segment_to_grid(pts[i], pts[i + 1])
++                        if clipped is None:
++                            continue
++                        (r0, c0), (r1, c1) = clipped
++                        draw_thick_line(water_mask, r0, c0, r1, c1, thickness=1)
++
+             elif "landuse" in tags and len(pts) >= 3:
+                 poly_rc = clip_polygon_to_grid(pts)
+                 if len(poly_rc) < 3:
+@@ -386,15 +562,35 @@
+                 max_c = min(cols - 1, int(np.ceil(poly_rc[:, 1].max())))
+                 if max_r > min_r and max_c > min_c:
+                     rr, cc = np.meshgrid(
+-                        np.arange(min_r, max_r + 1), np.arange(min_c, max_c + 1), indexing='ij'
++                        np.arange(min_r, max_r + 1), np.arange(min_c, max_c + 1), indexing="ij"
+                     )
+                     grid_pts = np.vstack((rr.ravel(), cc.ravel())).T
+                     path = Path(poly_rc)
+                     inside = path.contains_points(grid_pts).reshape(rr.shape)
+                     building_mask[min_r:max_r + 1, min_c:max_c + 1] |= inside
+ 
++    # Use coastline direction to identify the ocean-side connected component(s).
++    # The line is slightly thickened because the spread and connectivity checks use 8-neighbours.
++    if np.any(coastline_water_seeds) and np.any(coastline_mask):
++        coast_barrier = binary_dilation(coastline_mask, structure=np.ones((3, 3), dtype=bool), iterations=1)
++        components, _ = label(~coast_barrier, structure=np.ones((3, 3), dtype=np.uint8))
++        seed_labels = components[coastline_water_seeds & (~coast_barrier)]
++        seed_labels = seed_labels[seed_labels > 0]
++        if seed_labels.size:
++            counts = np.bincount(seed_labels, minlength=int(components.max()) + 1)
++            counts[0] = 0
++            ocean_label = int(np.argmax(counts))
++            if ocean_label > 0:
++                water_mask |= components == ocean_label
++        water_mask |= coast_barrier & binary_dilation(water_mask, structure=np.ones((3, 3), dtype=bool), iterations=1)
++
++    # OSM transport/settlement layers can overlap mapped water; physical water is non-burnable.
+     building_mask[road_mask] = False
+-    return road_mask, building_mask, road_count, bld_count, place_count, used_mirror
++    building_mask[water_mask] = False
++    water_mask[coastline_mask] = water_mask[coastline_mask] | binary_dilation(
++        water_mask, structure=np.ones((3, 3), dtype=bool), iterations=1
++    )[coastline_mask]
++    return road_mask, building_mask, water_mask, road_count, bld_count, place_count, used_mirror
+ 
+ 
+ def fetch_realtime_weather_openmeteo(lat, lon):
+@@ -464,19 +660,23 @@
+     return person_hours_matrix, total_multiplier
+ 
+ 
+-def compute_tobler_arrival_time(elevation, slope_deg, road_mask, dy_m, dx_m):
++def compute_tobler_arrival_time(elevation, slope_deg, road_mask, dy_m, dx_m, water_mask=None, building_mask=None):
+     """
+-    Tính thời gian tiếp cận tích lũy từ mạng lưới đường giao thông bằng Dijkstra đa nguồn
+-    (sử dụng đỉnh siêu nguồn ảo giúp tăng tốc gấp 20 lần và tiết kiệm RAM), có tính đến
+-    hệ thống trạm kiểm lâm / đường mòn tuần tra tại các vùng lõi núi cao như Hoàng Liên Sơn.
++    Tính thời gian tiếp cận tích lũy từ road_mask bằng đồ thị 8 hướng có trọng số Tobler.
++    Hàm không có lớp dữ liệu riêng cho trạm kiểm lâm hoặc đường mòn tuần tra.
++    walk_speed_kmh là tốc độ tham chiếu theo độ dốc cục bộ không dấu; thời gian tích lũy
++    sử dụng độ chênh cao có dấu của từng cạnh.
+     """
+     rows, cols = GRID_SHAPE
+     elevation = np.asarray(elevation, dtype=np.float32)
+     slope_deg = np.asarray(slope_deg, dtype=np.float32)
+     road_mask = np.asarray(road_mask, dtype=bool)
+-    if elevation.shape != GRID_SHAPE or slope_deg.shape != GRID_SHAPE or road_mask.shape != GRID_SHAPE:
+-        raise ValueError("elevation, slope_deg và road_mask phải có cùng shape GRID_SHAPE.")
+-
++    water_mask = np.zeros(GRID_SHAPE, dtype=bool) if water_mask is None else np.asarray(water_mask, dtype=bool)
++    building_mask = np.zeros(GRID_SHAPE, dtype=bool) if building_mask is None else np.asarray(building_mask, dtype=bool)
++    if any(m.shape != GRID_SHAPE for m in (elevation, slope_deg, road_mask, water_mask, building_mask)):
++        raise ValueError("elevation, slope_deg, road_mask, water_mask và building_mask phải có cùng shape GRID_SHAPE.")
++
++    walkable = (~water_mask) & (~building_mask)
+     N = rows * cols
+     idx = np.arange(N, dtype=np.int32).reshape((rows, cols))
+ 
+@@ -492,83 +692,122 @@
+ 
+     u_parts, v_parts, w_parts = [], [], []
+ 
+-    u_h, v_h = idx[:, :-1].ravel(), idx[:, 1:].ravel()
+-    dz_h = (elevation[:, 1:] - elevation[:, :-1]).ravel()
+-    u_parts.extend([u_h, v_h]); v_parts.extend([v_h, u_h])
+-    w_parts.extend([edge_hours(dx_m, dz_h), edge_hours(dx_m, -dz_h)])
+-
+-    u_v, v_v = idx[:-1, :].ravel(), idx[1:, :].ravel()
+-    dz_v = (elevation[1:, :] - elevation[:-1, :]).ravel()
+-    u_parts.extend([u_v, v_v]); v_parts.extend([v_v, u_v])
+-    w_parts.extend([edge_hours(dy_m, dz_v), edge_hours(dy_m, -dz_v)])
+-
+-    diag_m = float(np.hypot(dy_m, dx_m))
+-    u_d1, v_d1 = idx[:-1, :-1].ravel(), idx[1:, 1:].ravel()
+-    dz_d1 = (elevation[1:, 1:] - elevation[:-1, :-1]).ravel()
+-    u_parts.extend([u_d1, v_d1]); v_parts.extend([v_d1, u_d1])
+-    w_parts.extend([edge_hours(diag_m, dz_d1), edge_hours(diag_m, -dz_d1)])
+-
+-    u_d2, v_d2 = idx[:-1, 1:].ravel(), idx[1:, :-1].ravel()
+-    dz_d2 = (elevation[1:, :-1] - elevation[:-1, 1:]).ravel()
+-    u_parts.extend([u_d2, v_d2]); v_parts.extend([v_d2, u_d2])
+-    w_parts.extend([edge_hours(diag_m, dz_d2), edge_hours(diag_m, -dz_d2)])
+-
+-    if np.any(road_mask):
+-        source_nodes = idx[road_mask].ravel()
++    # Build directed edges only between walkable cells. Diagonal movement cannot cut a corner
++    # between water/settlement cells, matching the access assumptions used by the planner.
++    directions = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
++    for dr, dc in directions:
++        src_r = slice(max(0, -dr), rows - max(0, dr))
++        src_c = slice(max(0, -dc), cols - max(0, dc))
++        dst_r = slice(max(0, dr), rows - max(0, -dr))
++        dst_c = slice(max(0, dc), cols - max(0, -dc))
++        valid = walkable[src_r, src_c] & walkable[dst_r, dst_c]
++        if dr != 0 and dc != 0:
++            valid &= walkable[src_r, dst_c] & walkable[dst_r, src_c]
++        if not np.any(valid):
++            continue
++        dist_m = float(np.hypot(dr * dy_m, dc * dx_m))
++        u = idx[src_r, src_c][valid]
++        v = idx[dst_r, dst_c][valid]
++        dz = (elevation[dst_r, dst_c] - elevation[src_r, src_c])[valid]
++        u_parts.append(u.astype(np.int32, copy=False))
++        v_parts.append(v.astype(np.int32, copy=False))
++        w_parts.append(edge_hours(dist_m, dz))
++
++    source_road_mask = road_mask & walkable
++    if np.any(source_road_mask):
++        source_nodes = idx[source_road_mask].ravel()
+     else:
+         border_mask = np.zeros(GRID_SHAPE, dtype=bool)
+         border_mask[0, :] = True; border_mask[-1, :] = True
+         border_mask[:, 0] = True; border_mask[:, -1] = True
+-        source_nodes = idx[border_mask].ravel()
+-
+-    super_u = np.full(len(source_nodes), N, dtype=np.int32)
+-    super_w = np.zeros(len(source_nodes), dtype=np.float64)
+-    u_parts.append(super_u)
+-    v_parts.append(source_nodes)
+-    w_parts.append(super_w)
++        source_nodes = idx[border_mask & walkable].ravel()
++    if len(source_nodes) == 0:
++        raise ValueError("Không có nguồn hành quân hợp lệ: cần ít nhất một pixel đường hoặc viền bản đồ không nằm trong nước/khu dân cư.")
+ 
+     all_u = np.concatenate(u_parts)
+     all_v = np.concatenate(v_parts)
+     all_w = np.concatenate(w_parts)
+     del u_parts, v_parts, w_parts
+ 
+-    adj_matrix = sp.csr_matrix((all_w, (all_u, all_v)), shape=(N + 1, N + 1), dtype=np.float64)
++    # Add explicit zero-weight virtual-source arcs in the same COO construction. Sparse-matrix
++    # addition can drop explicit zero entries, which would silently disconnect the super-source.
++    super_source = N
++    su = np.full(len(source_nodes), super_source, dtype=np.int32)
++    sv = source_nodes.astype(np.int32, copy=False)
++    sw = np.zeros(len(source_nodes), dtype=np.float64)
++    all_u = np.concatenate([all_u, su])
++    all_v = np.concatenate([all_v, sv])
++    all_w = np.concatenate([all_w, sw])
++    del su, sv, sw
++    adj_extended = sp.csr_matrix(
++        (all_w, (all_u, all_v)), shape=(N + 1, N + 1), dtype=np.float64
++    )
+     del all_u, all_v, all_w
+ 
+-    dist_hours = dijkstra(csgraph=adj_matrix, directed=True, indices=N)[:N]
+-    del adj_matrix
+-
+-    # Preserve the accumulated Dijkstra travel time. A saturating tanh would cap long
+-    # journeys at 2.8 hours and could mark an unreachable-in-time route as feasible.
++    dist_hours = dijkstra(csgraph=adj_extended, directed=True, indices=super_source)[:N]
++    del adj_extended
++
++    # Preserve accumulated Dijkstra travel time. The displayed local speed remains a reference statistic.
+     arrival_time = dist_hours.reshape(GRID_SHAPE).astype(np.float32)
++    arrival_time[~walkable] = np.inf
+     return arrival_time, local_speed_kmh
+ 
+ 
+-@st.cache_data(show_spinner=False, ttl=1800, max_entries=6)
++@st.cache_data(show_spinner=False, persist="disk", max_entries=6)
+ def fetch_and_build_api_environment(lat_center, lon_center):
+-    """
+-    Hàm lõi Tầng 1 & 2: Kết nối 100% qua API để lấy Địa hình DEM, Độ dốc, Hướng phơi (Aspect),
+-    Đường giao thông, Khu dân cư và giữ tạm trên RAM (giới hạn max_entries=6 tránh tràn RAM).
++    """Build static terrain/OSM layers; persistent cache permits reuse after restart.
++
++    High-resolution local GeoTIFFs are preferred when present. Otherwise elevation falls
++    back to a 20x20 OpenTopoData sample and fuel falls back to an explicitly labelled proxy.
++    A cache miss still requires the corresponding API(s); caching is not preloaded offline data.
+     """
+     dy_m, dx_m, pixel_area_ha = compute_projected_pixel_scales(lat_center)
+ 
+-    elevation = fetch_api_dem_grid(lat_center, lon_center, grid_n=20)
++    road_mask, building_mask, water_mask, road_cnt, bld_cnt, place_cnt, mirror_used = fetch_api_osm_landscape(
++        lat_center, lon_center
++    )
++
++    local_elevation, dem_source = load_local_dem_grid(lat_center, lon_center, water_mask)
++    if local_elevation is None:
++        elevation = fetch_api_dem_grid(lat_center, lon_center, grid_n=20)
++        dem_source = "OpenTopoData SRTM90m: 20x20 điểm mẫu nội suy lên lưới tính toán 540x540 (không phải DEM 30 m)"
++    else:
++        elevation = local_elevation
+ 
+     dy, dx = np.gradient(elevation, dy_m, dx_m)
+     slope_rad = np.arctan(np.sqrt(dx**2 + dy**2))
+     slope_deg = np.degrees(slope_rad).astype(np.float32)
+     aspect_deg = (np.degrees(np.arctan2(-dx, dy)) % 360.0).astype(np.float32)
+ 
+-    road_mask, building_mask, road_cnt, bld_cnt, place_cnt, mirror_used = fetch_api_osm_landscape(
+-        lat_center, lon_center
+-    )
+-
+     slope_sin = np.sin(np.radians(np.clip(slope_deg, 0.0, 60.0))).astype(np.float32)
+     aspect_flammability = (
+         1.0 + 0.16 * slope_sin * np.cos(np.radians(aspect_deg - 202.5))
+     ).astype(np.float32)
+ 
+-    fuel_matrix = aspect_flammability.copy()
++    worldcover_classes, wc_water_mask, landcover_source, landcover_coverage_pct = load_local_worldcover_grid(
++        lat_center, lon_center, water_mask
++    )
++    if wc_water_mask is not None:
++        water_mask = wc_water_mask
++        # ESA WorldCover 2021 class -> heuristic relative fuel availability (not measured biomass).
++        # 10 tree, 20 shrub, 30 grass, 40 cropland, 90 herbaceous wetland, 95 mangroves.
++        class_fuel = np.zeros(GRID_SHAPE, dtype=np.float32)
++        class_fuel[worldcover_classes == 10] = 1.00
++        class_fuel[worldcover_classes == 20] = 0.82
++        class_fuel[worldcover_classes == 30] = 0.58
++        class_fuel[worldcover_classes == 40] = 0.28
++        class_fuel[worldcover_classes == 90] = 0.12
++        class_fuel[worldcover_classes == 95] = 0.90
++        class_fuel[worldcover_classes == 100] = 0.10
++        fuel_matrix = class_fuel * aspect_flammability
++    else:
++        worldcover_classes = np.zeros(GRID_SHAPE, dtype=np.uint16)
++        fuel_matrix = aspect_flammability.copy()
++        landcover_source = "PROXY theo hướng phơi — KHÔNG có lớp thảm phủ thực tế"
++        landcover_coverage_pct = 0.0
++
++    # Non-burnable barriers take precedence over heuristic or classified fuel values.
++    fuel_matrix[water_mask] = 0.0
+     fuel_matrix[building_mask] = 0.0
+     fuel_matrix[road_mask] = 0.0
+ 
+@@ -576,7 +815,8 @@
+         slope_deg, road_mask, building_mask, aspect_deg=aspect_deg
+     )
+     arrival_time, walk_speed_kmh = compute_tobler_arrival_time(
+-        elevation, slope_deg, road_mask, dy_m, dx_m
++        elevation, slope_deg, road_mask, dy_m, dx_m,
++        water_mask=water_mask, building_mask=building_mask
+     )
+ 
+     ls = LightSource(azdeg=315, altdeg=42)
+@@ -598,6 +838,11 @@
+         "aspect_flammability": aspect_flammability,
+         "road_mask": road_mask,
+         "building_mask": building_mask,
++        "water_mask": water_mask,
++        "worldcover_classes": worldcover_classes,
++        "landcover_source": landcover_source,
++        "landcover_coverage_pct": landcover_coverage_pct,
++        "dem_source": dem_source,
+         "fuel_matrix": fuel_matrix,
+         "manpower_cost": manpower_cost,
+         "difficulty_mult": difficulty_mult,
+@@ -664,7 +909,7 @@
+     return out
+ 
+ 
+-def compute_2d_and_3d_firebreak_length(partition_mask, firebreak_mask, elevation, slope_deg, dy_m, dx_m):
++def compute_2d_and_3d_firebreak_length(firebreak_mask, elevation, slope_deg, dy_m, dx_m):
+     """Ước tính chiều dài 2D/3D từ đồ thị 8-lân-cận của skeleton tuyến."""
+     fb_pixels = int(np.sum(firebreak_mask))
+     pixel_count_km = (fb_pixels * NOMINAL_PIXEL_M) / 1000.0
+@@ -757,7 +1002,7 @@
+     return pd.DataFrame(rows_data)
+ 
+ 
+-def verify_topological_separation(source_mask, target_mask, barrier_mask, road_mask):
++def verify_topological_separation(source_mask, target_mask, barrier_mask, road_mask, nonburnable_mask=None):
+     """Kiểm định độc lập tính phân tách tô-pô 8 hướng bằng thuật toán loang BFS."""
+     rows, cols = GRID_SHAPE
+     source_mask = np.asarray(source_mask, dtype=bool)
+@@ -770,6 +1015,12 @@
+         return False, -1
+ 
+     blocked = barrier_mask | road_mask
++    if nonburnable_mask is not None:
++        nonburnable_mask = np.asarray(nonburnable_mask, dtype=bool)
++        if nonburnable_mask.shape != GRID_SHAPE:
++            return False, -1
++        # Targets remain traversable for the purpose of detecting whether fire can reach them.
++        blocked |= nonburnable_mask & (~target_mask)
+     visited = np.zeros(GRID_SHAPE, dtype=bool)
+     start_pts = np.argwhere(source_mask & (~blocked))
+     # An empty effective source is not evidence that the targets are separated.
+@@ -838,7 +1089,10 @@
+ 
+     struct_8 = np.ones((3, 3), dtype=bool)
+     building_guard = binary_dilation(env["building_mask"], structure=struct_8, iterations=3)
+-    burnable_forest = (env["fuel_matrix"] > 0.2) & (~env["road_mask"]) & (~building_guard)
++    water_mask = np.asarray(env.get("water_mask", np.zeros(GRID_SHAPE, dtype=bool)), dtype=bool)
++    burnable_forest = (
++        (env["fuel_matrix"] > 0.2) & (~env["road_mask"]) & (~building_guard) & (~water_mask)
++    )
+ 
+     # Limit simultaneously initialized candidate centers to a compact cluster.
+     # The full report uncertainty still affects planning/deadline allowances, but
+@@ -893,22 +1147,27 @@
+ def compute_continuous_fire_arrival_field(
+     current_fire_mask, env, wind_speed, wind_deg, humidity, prcp, temp, p_base, allow_spotting
+ ):
+-    """
+-    Tính trường thời gian lửa lan tới liên tục (giờ) trên lưới 540x540 bằng Dijkstra siêu nguồn ảo.
+-    Tích hợp đầy đủ: p_base, wind_speed, wind_deg, humidity, prcp, temp (nhiệt độ), allow_spotting,
+-    độ dốc 3D (slope_deg) và hướng phơi sườn dốc (aspect_deg / aspect_flammability).
++    """Compute shortest modeled fire arrival times over burnable cells only.
++
++    Non-burnable cells (roads, settlements, mapped water and all zero-fuel classes) are
++    not graph nodes, and diagonal transitions cannot cut across a non-burnable corner.
++    This is a deterministic travel-time approximation, not a calibrated fire forecast.
+     """
+     rows, cols = GRID_SHAPE
+     N = rows * cols
+     idx = np.arange(N, dtype=np.int32).reshape((rows, cols))
+-    elev = env["elevation"]
+-    dy_m, dx_m = env["dy_m"], env["dx_m"]
++    elev = np.asarray(env["elevation"], dtype=np.float32)
++    dy_m, dx_m = float(env["dy_m"]), float(env["dx_m"])
++    road_mask = np.asarray(env["road_mask"], dtype=bool)
++    building_mask = np.asarray(env["building_mask"], dtype=bool)
++    water_mask = np.asarray(env.get("water_mask", np.zeros(GRID_SHAPE, dtype=bool)), dtype=bool)
++    fuel = np.asarray(env["fuel_matrix"], dtype=np.float32)
++    burnable = (fuel > 0.0) & (~road_mask) & (~building_mask) & (~water_mask)
+ 
+     w_moisture = float(np.exp(-0.015 * max(0.0, humidity - 30.0)))
+     w_rain = float(np.exp(-2.0 * max(0.0, prcp)))
+     w_temp = float(np.exp(0.024 * (float(temp) - 20.0)))
+     spotting_boost = (1.0 + 0.06 * max(0.0, wind_speed - 4.0)) if allow_spotting else 1.0
+-
+     wind_rad = np.radians(wind_deg)
+     wind_vr = float(np.cos(wind_rad))
+     wind_vc = float(-np.sin(wind_rad))
+@@ -918,7 +1177,6 @@
+         (0, -1),           (0, 1),
+         (1, -1),  (1, 0),  (1, 1)
+     ]
+-
+     u_list, v_list, w_list = [], [], []
+     for dr, dc in directions:
+         dist_2d = float(np.hypot(dr * dy_m, dc * dx_m))
+@@ -927,13 +1185,22 @@
+         dst_r = slice(max(0, dr), rows - max(0, -dr))
+         dst_c = slice(max(0, dc), cols - max(0, -dc))
+ 
+-        u_nodes = idx[src_r, src_c].ravel()
+-        v_nodes = idx[dst_r, dst_c].ravel()
+-
+-        dz = (elev[dst_r, dst_c] - elev[src_r, src_c]).ravel()
++        src_burnable = burnable[src_r, src_c]
++        dst_burnable = burnable[dst_r, dst_c]
++        valid = src_burnable & dst_burnable
++        # Match the CA's non-corner-cutting rule around roads, buildings, water and zero-fuel cells.
++        if dr != 0 and dc != 0:
++            side_a = burnable[src_r, dst_c]
++            side_b = burnable[dst_r, src_c]
++            valid &= side_a & side_b
++        if not np.any(valid):
++            continue
++
++        u_nodes = idx[src_r, src_c][valid]
++        v_nodes = idx[dst_r, dst_c][valid]
++        dz = (elev[dst_r, dst_c] - elev[src_r, src_c])[valid]
+         dist_3d = np.hypot(dist_2d, dz)
+-        dist_norm = dist_3d / NOMINAL_PIXEL_M
+-
++        dist_norm = np.maximum(dist_3d / NOMINAL_PIXEL_M, 1e-6)
+         local_slope_deg = np.degrees(np.arctan2(dz, dist_2d))
+         w_slope = np.exp(0.035 * np.clip(local_slope_deg, -45.0, 60.0))
+ 
+@@ -944,34 +1211,27 @@
+         else:
+             w_wind = np.exp(0.25 * wind_speed * cos_wind)
+ 
+-        fuel_dst = np.clip(env["fuel_matrix"][dst_r, dst_c].ravel(), 0.08, 1.35)
++        fuel_dst = np.clip(fuel[dst_r, dst_c][valid], 0.08, 1.35)
+         p_single = np.clip(
+-            p_base * fuel_dst * w_slope * w_wind * w_moisture * w_rain * w_temp / (dist_norm ** 0.5),
++            p_base * fuel_dst * w_slope * w_wind * w_moisture * w_rain * w_temp / np.sqrt(dist_norm),
+             0.008, 0.96
+         )
+         p_front = 1.0 - (1.0 - p_single) ** 2.6
+         step_hours = (CA_STEP_TO_HOURS * 0.85) / np.clip(p_front, 0.02, 0.98)
+-
+-        road_dst = env["road_mask"][dst_r, dst_c].ravel()
+-        if not (allow_spotting and wind_speed > 8.0 and cos_wind > 0.35):
+-            step_hours = np.where(road_dst, step_hours * 2.2, step_hours)
+-        else:
+-            step_hours = np.where(road_dst, step_hours * 1.15, step_hours)
+-
+-        u_list.append(u_nodes)
+-        v_list.append(v_nodes)
++        u_list.append(u_nodes.astype(np.int32, copy=False))
++        v_list.append(v_nodes.astype(np.int32, copy=False))
+         w_list.append(step_hours.astype(np.float64))
+ 
+-    fire_sources = idx[current_fire_mask].ravel()
++    source_mask = np.asarray(current_fire_mask, dtype=bool) & burnable
++    fire_sources = idx[source_mask].ravel()
+     if len(fire_sources) == 0:
+-        return np.full(GRID_SHAPE, 12.0, dtype=np.float32)
++        return np.full(GRID_SHAPE, np.inf, dtype=np.float32)
+ 
+     super_u = np.full(len(fire_sources), N, dtype=np.int32)
+     super_w = np.zeros(len(fire_sources), dtype=np.float64)
+     u_list.append(super_u)
+-    v_list.append(fire_sources)
++    v_list.append(fire_sources.astype(np.int32, copy=False))
+     w_list.append(super_w)
+-
+     all_u = np.concatenate(u_list)
+     all_v = np.concatenate(v_list)
+     all_w = np.concatenate(w_list)
+@@ -979,10 +1239,11 @@
+ 
+     spread_graph = sp.csr_matrix((all_w, (all_u, all_v)), shape=(N + 1, N + 1), dtype=np.float64)
+     del all_u, all_v, all_w
+-
+     cont_arrival = dijkstra(csgraph=spread_graph, directed=True, indices=N)[:N]
+     del spread_graph
+-    return cont_arrival.reshape(GRID_SHAPE).astype(np.float32)
++    arrival = cont_arrival.reshape(GRID_SHAPE).astype(np.float32)
++    arrival[~burnable] = np.inf
++    return arrival
+ 
+ 
+ _WEYL_OFFSETS = (
+@@ -998,24 +1259,30 @@
+ ):
+     """
+     Bước chuyển trạng thái CA vector hóa trên địa hình 3D.
+-    Sử dụng ma trận số ngẫu nhiên chung (True Common Random Numbers) kết hợp dịch pha Weyl
+-    giúp Pass 1 và Pass 2 đồng bộ tuyệt đối trên từng pixel (r, c) và tăng tốc gấp 8 lần.
++    Dùng số ngẫu nhiên chung theo pixel và timestep để ghép cặp kịch bản đối chứng.
++    Dịch pha Weyl tách ngưỡng theo hướng; CRN hỗ trợ so sánh có kiểm soát nhưng không bảo đảm
++    tính đơn điệu và không hàm ý rằng kịch bản có đường băng luôn cháy ít hơn.
+     """
+     next_grid = grid.copy()
+     next_burn_time = burn_time.copy()
+ 
+     road_mask = np.asarray(env["road_mask"], dtype=bool)
+     building_mask = np.asarray(env["building_mask"], dtype=bool)
++    water_mask = np.asarray(env.get("water_mask", np.zeros(GRID_SHAPE, dtype=bool)), dtype=bool)
+     if active_barrier_mask is not None:
+         active_barrier_mask = np.asarray(active_barrier_mask, dtype=bool)
+         # A road can be used as part of the blocking route, but remains OSM road,
+-        # not newly constructed firebreak. Never assign STATE_FIREBREAK to roads/buildings.
+-        constructed_pixels = active_barrier_mask & (~road_mask) & (~building_mask)
++        # not newly constructed firebreak. Never overwrite cells that have already
++        # ignited or burned: a late-built line cannot magically extinguish them.
++        constructed_pixels = (
++            active_barrier_mask & (~road_mask) & (~building_mask) & (~water_mask)
++            & (grid != STATE_BURNING) & (grid != STATE_BURNED)
++        )
+         next_grid[constructed_pixels] = STATE_FIREBREAK
+ 
++    # If fire reached a planned line before its completion, preserve the burning cell
++    # and let it continue to spread. The final dynamic validation will reject that plan.
+     burning_mask = (grid == STATE_BURNING)
+-    if active_barrier_mask is not None:
+-        burning_mask = burning_mask & (~active_barrier_mask)
+ 
+     # Rút cố định 1 ma trận ngẫu nhiên trên mỗi timestep để đồng bộ tuyệt đối chuỗi RNG
+     base_rand_grid = rng.random(GRID_SHAPE, dtype=np.float32)
+@@ -1043,12 +1310,21 @@
+         (1, -1),  (1, 0),  (1, 1)
+     ]
+ 
+-    tree_mask = (next_grid == STATE_TREE) & (env["fuel_matrix"] > 0.0) & (~road_mask) & (~building_mask)
++    tree_mask = (
++        (next_grid == STATE_TREE) & (env["fuel_matrix"] > 0.0)
++        & (~road_mask) & (~building_mask) & (~water_mask)
++    )
++    spread_passable = (
++        (env["fuel_matrix"] > 0.0) & (~road_mask) & (~building_mask) & (~water_mask)
++    )
+     if active_barrier_mask is not None:
+         tree_mask &= (~active_barrier_mask)
++        spread_passable &= (~active_barrier_mask)
+     if blocked_spread_mask is not None:
+         # Protected/buffer areas block spread without being mislabeled as constructed lines.
+-        tree_mask &= (~np.asarray(blocked_spread_mask, dtype=bool))
++        blocked_spread_mask = np.asarray(blocked_spread_mask, dtype=bool)
++        tree_mask &= (~blocked_spread_mask)
++        spread_passable &= (~blocked_spread_mask)
+ 
+     elev = env["elevation"]
+ 
+@@ -1063,6 +1339,13 @@
+ 
+         shifted_burning[dst_r, dst_c] = burning_mask[src_r, src_c]
+         candidate_mask = shifted_burning & tree_mask
++        if dr != 0 and dc != 0:
++            # Do not allow fire to slip diagonally between two non-burnable corner cells.
++            side_a = spread_passable[src_r, dst_c]
++            side_b = spread_passable[dst_r, src_c]
++            corner_ok = np.zeros_like(candidate_mask)
++            corner_ok[dst_r, dst_c] = (side_a & side_b)
++            candidate_mask &= corner_ok
+         if not np.any(candidate_mask):
+             continue
+ 
+@@ -1219,6 +1502,20 @@
+     return full_partition, sink_reached
+ 
+ 
++def _conservative_access_time_p90(access_times):
++    """Return (P90 access time in hours, all_cells_accessible).
++
++    An inaccessible construction pixel makes the candidate infeasible; it is not
++    silently dropped from the percentile. Empty work masks require no travel.
++    """
++    values = np.asarray(access_times, dtype=np.float64).ravel()
++    if values.size == 0:
++        return 0.0, True
++    if not np.all(np.isfinite(values)):
++        return float("inf"), False
++    return float(np.percentile(values, 90)), True
++
++
+ @st.cache_data(show_spinner=False, ttl=1800, max_entries=4)
+ def run_full_simulation_and_mincut(
+     lat_center, lon_center,
+@@ -1266,16 +1563,13 @@
+                             burn_time_t0[nr, nc] = 1
+ 
+     if not np.any(grid_t0 == STATE_BURNING):
+-        tree_pts = np.argwhere((env["fuel_matrix"] > 0.0) & (~env["road_mask"]) & (~outer_guard_band))
+-        if len(tree_pts) > 0:
+-            dists = (tree_pts[:, 0] - est_origin_r)**2 + (tree_pts[:, 1] - est_origin_c)**2
+-            nr, nc = tree_pts[np.argmin(dists)]
+-            for dr in range(-2, 3):
+-                for dc in range(-2, 3):
+-                    rr, cc = int(np.clip(nr + dr, 4, 535)), int(np.clip(nc + dc, 4, 535))
+-                    if not outer_guard_band[rr, cc] and not env["road_mask"][rr, cc]:
+-                        grid_t0[rr, cc] = STATE_BURNING
+-                        burn_time_t0[rr, cc] = 1
++        # Never silently relocate the ignition to an arbitrary burnable cell.
++        # The backcast routine already constrained candidate seeds to the declared uncertainty.
++        raise ValueError(
++            "Không khởi tạo được ô cháy hợp lệ tại vị trí truy ngược và bán kính đã chọn. "
++            "Kiểm tra tọa độ, bán kính khởi phát, sai số báo tin, mặt nạ nước/thảm phủ và khu dân cư. "
++            "Mô hình dừng thay vì tự tạo một đám cháy khác ở vị trí không có căn cứ."
++        )
+ 
+     preburn_steps = int(round(preburn_hours / CA_STEP_TO_HOURS))
+     for _ in range(preburn_steps):
+@@ -1485,6 +1779,8 @@
+     ).astype(np.float32)
+ 
+     safe_cost_matrix = np.clip(dynamic_cost_matrix, 0.8, 4000.0)
++    # Water is not a construction surface; represent it as a high-cost planning node.
++    safe_cost_matrix[env["water_mask"]] = 40000.0
+     safe_cost_matrix[death_zone_mask] = 4000.0
+     safe_cost_matrix[sink_guard_band] = 40000.0
+ 
+@@ -1551,7 +1847,10 @@
+         # the blocking corridor, but are not colored/charged as newly constructed firebreak.
+         route_mask = outer_ring & (~sink_guard_band)
+         route_mask = _largest_connected_component(route_mask)
+-        construction_mask = route_mask & (~env["road_mask"]) & (~env["building_mask"]) & (~sink_guard_band)
++        construction_mask = (
++            route_mask & (~env["road_mask"]) & (~env["building_mask"])
++            & (~env["water_mask"]) & (~sink_guard_band)
++        )
+ 
+         route_pixels = int(np.sum(route_mask))
+         work_pixels = int(np.sum(construction_mask))
+@@ -1560,10 +1859,10 @@
+             continue
+ 
+         len_3d_km, len_2d_km, route_pixel_km = compute_2d_and_3d_firebreak_length(
+-            partition_mask, route_mask, env["elevation"], env["slope_deg"], dy_m, dx_m
++            route_mask, env["elevation"], env["slope_deg"], dy_m, dx_m
+         )
+         work_len_3d_km, work_len_2d_km, work_pixel_km = compute_2d_and_3d_firebreak_length(
+-            partition_mask, construction_mask, env["elevation"], env["slope_deg"], dy_m, dx_m
++            construction_mask, env["elevation"], env["slope_deg"], dy_m, dx_m
+         )
+ 
+         # Verify the same effective barrier width that will be applied in the CA pass;
+@@ -1578,22 +1877,28 @@
+         # only the tiny fire mask at T=0. Otherwise a line could pass around today's fire
+         # but fail to contain the footprint predicted at construction time.
+         topo_valid, leaked_targets = verify_topological_separation(
+-            source_mask, sink_mask, candidate_barrier, env["road_mask"]
++            source_mask, sink_mask, candidate_barrier, env["road_mask"],
++            nonburnable_mask=(env["fuel_matrix"] <= 0.0) | env["water_mask"]
+         )
+ 
+-        mean_travel_time = float(np.mean(arrival_time[route_mask]))
+-        mean_slope_fb = float(np.mean(env["slope_deg"][route_mask]))
+-        max_slope_fb  = float(np.max(env["slope_deg"][route_mask]))
++        access_time_p90, all_construction_pixels_accessible = _conservative_access_time_p90(
++            arrival_time[construction_mask]
++        )
++        mean_slope_fb = float(np.mean(env["slope_deg"][construction_mask])) if np.any(construction_mask) else 0.0
++        max_slope_fb  = float(np.max(env["slope_deg"][construction_mask])) if np.any(construction_mask) else 0.0
+ 
+         valid_arrival = fire_arrival_time[route_mask]
+         finite_arrival = valid_arrival[np.isfinite(valid_arrival)]
+-        if len(finite_arrival) > 0:
+-            # Conservative early-arrival quantile; do not impose an artificial minimum deadline.
+-            min_fire_arrival = float(np.clip(np.percentile(finite_arrival, 10), 0.0, float(sim_hours)))
++        arrival_observed = len(finite_arrival) > 0
++        if arrival_observed:
++            # Conservative deadline: earliest modeled arrival, minus one CA timestep for margin.
++            min_fire_arrival = max(0.0, float(np.min(finite_arrival)) - CA_STEP_TO_HOURS)
+         else:
++            # Right-censored: no modeled arrival was found within the simulation horizon.
++            # The horizon is not represented as an actual predicted arrival time.
+             min_fire_arrival = float(sim_hours)
+ 
+-        available_time = max(0.0, min_fire_arrival - mean_travel_time)
++        available_time = max(0.0, min_fire_arrival - access_time_p90) if np.isfinite(access_time_p90) else 0.0
+         max_effective_manpower = _effective_line_workforce(
+             total_manpower, squad_size, work_pixels, squad_factor
+         )
+@@ -1604,9 +1909,14 @@
+         )
+         total_person_hours = float(np.sum(cost_matrix[construction_mask])) * work_geom_ratio
+         total_cutting_time = total_person_hours / max(1.0, max_effective_manpower)
+-        completion_time_hours = mean_travel_time + total_cutting_time
+-
+-        constraints_met = bool(topo_valid and completion_time_hours <= min_fire_arrival and route_pixels > 0)
++        completion_time_hours = access_time_p90 + total_cutting_time
++
++        constraints_met = bool(
++            topo_valid and all_construction_pixels_accessible
++            and np.isfinite(completion_time_hours)
++            and completion_time_hours <= min_fire_arrival and route_pixels > 0
++            and (arrival_observed or completion_time_hours < float(sim_hours))
++        )
+ 
+         metrics_entry = {
+             "Buffer (px)": buffer_pixels,
+@@ -1616,8 +1926,8 @@
+             "Chiều dài 2D Phẳng (km)": round(len_2d_km, 2),
+             "Độ dài Pixel (N×30m)": round(route_pixel_km, 2),
+             "Độ dốc TB / Max (°)": f"{mean_slope_fb:.1f}° / {max_slope_fb:.1f}°",
+-            "TG Hành quân Tobler (giờ)": round(mean_travel_time, 2),
+-            "TG Lửa chạm (giờ)": round(min_fire_arrival, 2),
++            "TG tiếp cận P90 (giờ)": round(access_time_p90, 2) if np.isfinite(access_time_p90) else "Không tiếp cận được",
++            "TG Lửa chạm (giờ)": round(min_fire_arrival, 2) if arrival_observed else f"> {sim_hours} (chưa đến trong horizon)",
+             "Quỹ TG Thi công (giờ)": round(available_time, 2),
+             "TG Đào theo Độ dốc (giờ)": round(total_cutting_time, 2),
+             "Khối lượng (Giờ công)": round(total_person_hours, 1),
+@@ -1736,10 +2046,22 @@
+     reduced_area_ha = uncontrolled_ha - controlled_ha  # net reduction; may be negative
+     reduction_pct = (reduced_area_ha / uncontrolled_ha * 100.0) if uncontrolled_ha > 0 else 0.0
+ 
++    # Count both a burned crossing into the sink-side partition and any fire that
++    # reached the planned barrier itself before it became effective. A barrier must
++    # never erase a burning/burned state when activated.
+     breach_pixels = (
+-        int(np.sum(controlled_burned & (~best_partition) & (~thick_barrier)))
++        int(np.sum(controlled_burned & ((~best_partition & ~thick_barrier) | thick_barrier)))
+         if accepted else 0
+     )
++    if accepted and breach_pixels > 0:
++        accepted = False
++        status = (
++            f"Không đạt kiểm định động: {breach_pixels} pixel đã cháy ngoài phía nguồn/phần tuyến "
++            "được kiểm định trong kịch bản có tuyến. Kiểm định tô-pô tĩnh không đủ để xác nhận containment."
++        )
++        if best_metrics is not None:
++            best_metrics["Trạng thái Ràng buộc"] = "❌ Không đạt kiểm định động"
++            best_metrics["Kiểm định Tô-pô"] = "Tĩnh đạt nhưng động vi phạm"
+ 
+     final_metrics = best_metrics if best_metrics is not None else {
+         "Buffer (px)": buffer_pixels,
+@@ -1748,7 +2070,7 @@
+         "Chiều dài 2D Phẳng (km)": 0.0,
+         "Độ dài Pixel (N×30m)": 0.0,
+         "Độ dốc TB / Max (°)": "0° / 0°",
+-        "TG Hành quân Tobler (giờ)": 0.0,
++        "TG tiếp cận P90 (giờ)": 0.0,
+         "TG Lửa chạm (giờ)": 0.0,
+         "Quỹ TG Thi công (giờ)": 0.0,
+         "TG Đào theo Độ dốc (giờ)": 0.0,
+@@ -1801,13 +2123,14 @@
+     burning_mask = (fire_state == STATE_BURNING)
+     img[burning_mask] = [1.0, 0.18, 0.0]
+ 
+-    fb_mask = (fire_state == STATE_FIREBREAK) & (~env["road_mask"]) & (~env["building_mask"])
++    fb_mask = (fire_state == STATE_FIREBREAK) & (~env["road_mask"]) & (~env["building_mask"]) & (~env["water_mask"])
+     if np.any(fb_mask):
+         img[fb_mask] = [0.0, 0.98, 0.85]
+ 
+     # Keep existing OSM features visually distinct from new construction.
+-    img[env["road_mask"]] = [0.75, 0.78, 0.80]
+-    img[env["building_mask"]] = [1.0, 0.72, 0.05]
++    img[env["water_mask"]] = [0.12, 0.42, 0.82]
++    img[env["road_mask"] & (~env["water_mask"])] = [0.75, 0.78, 0.80]
++    img[env["building_mask"] & (~env["water_mask"])] = [1.0, 0.72, 0.05]
+     return np.clip(img, 0.0, 1.0)
+ 
+ 
+@@ -1824,8 +2147,9 @@
+     dz_only = death_zone_mask & (~ctrl_final)
+     img[dz_only] = img[dz_only] * 0.60 + np.array([0.75, 0.15, 0.45], dtype=np.float32) * 0.40
+ 
+-    img[env["road_mask"]] = [0.78, 0.80, 0.82]
+-    img[env["building_mask"]] = [1.0, 0.75, 0.0]
++    img[env["water_mask"]] = [0.12, 0.42, 0.82]
++    img[env["road_mask"] & (~env["water_mask"])] = [0.78, 0.80, 0.82]
++    img[env["building_mask"] & (~env["water_mask"])] = [1.0, 0.75, 0.0]
+ 
+     init_burned  = (history_unctrl[0] == STATE_BURNED)
+     init_burning = (history_unctrl[0] == STATE_BURNING)
+@@ -1834,11 +2158,12 @@
+ 
+     fb_vis = binary_dilation(firebreak_mask, iterations=1)
+     # OSM roads are never painted as new firebreak in the tactical map.
+-    fb_vis &= (~env["road_mask"]) & (~env["building_mask"])
++    fb_vis &= (~env["road_mask"]) & (~env["building_mask"]) & (~env["water_mask"])
+     img[fb_vis] = [0.0, 0.98, 0.85]
+     # Draw source road/building data last so reuse of a road is visibly distinct from clearing.
+-    img[env["road_mask"]] = [0.78, 0.80, 0.82]
+-    img[env["building_mask"]] = [1.0, 0.75, 0.0]
++    img[env["water_mask"]] = [0.12, 0.42, 0.82]
++    img[env["road_mask"] & (~env["water_mask"])] = [0.78, 0.80, 0.82]
++    img[env["building_mask"] & (~env["water_mask"])] = [1.0, 0.75, 0.0]
+ 
+     return np.clip(img, 0.0, 1.0)
+ 
+@@ -1848,7 +2173,7 @@
+ # ==============================================================================
+ st.title("🔥 Hệ thống Mô phỏng Cháy Rừng & Đề xuất Đường băng Cản lửa bằng Thuật toán")
+ st.caption(
+-    "Kết nối API dữ liệu thực tế (OpenTopoData SRTM 90m DEM, OpenStreetMap Overpass & Open-Meteo Weather) | "
++    "Dữ liệu địa hình ưu tiên GeoTIFF cục bộ; fallback OpenTopoData mẫu thưa; OpenStreetMap Overpass & Open-Meteo Weather | "
+     "Mô phỏng CA Đồng bộ CRN, Dijkstra-Tobler (1993), Bức xạ Hướng phơi (Aspect) & Min-Cut Động theo Nhân lực"
+ )
+ 
+@@ -1940,7 +2265,7 @@
+ 
+     temp       = st.slider("Nhiệt độ môi trường (°C)", 0.0, 45.0, key="w_temp", step=0.5)
+     wind_speed = st.slider("Tốc độ gió (m/s)", 0.0, 20.0, key="w_speed", step=0.5)
+-    wind_deg   = st.slider("Hướng gió thổi (Độ, 0°=Nam, 180°=Bắc)", 0, 360, key="w_deg", step=5)
++    wind_deg   = st.slider("Hướng gió TỪ (độ khí tượng: 0°=Bắc, 90°=Đông)", 0, 360, key="w_deg", step=5)
+     humidity   = st.slider("Độ ẩm tương đối (%)", 10, 100, key="w_hum", step=5)
+     prcp       = st.slider("Lượng mưa (mm/giờ)", 0.0, 10.0, key="w_prcp", step=0.2)
+     allow_spotting = st.checkbox(
+@@ -2014,13 +2339,26 @@
+ # Thanh trạng thái xác nhận dữ liệu API thực tế tại tọa độ đang chọn
+ st.info(
+     f"🌐 **Trạng thái Kết nối API Thực tế tại `({params['lat_center']:.4f}°N, {params['lon_center']:.4f}°E)`:** "
+-    f"**DEM địa hình SRTM 90m (OpenTopoData API):** `{env['elevation'].min():.0f}m – {env['elevation'].max():.0f}m` "
++        f"**Cao độ:** `{env['elevation'].min():.0f}m – {env['elevation'].max():.0f}m` "
+     f"(Độ dốc TB `{env['slope_deg'].mean():.1f}°`, Max `{env['slope_deg'].max():.1f}°`, "
+     f"Hướng phơi TB `{env['aspect_deg'].mean():.0f}°`) | "
+     f"**Nhiệt độ:** `{params['temp']:.1f}°C` | "
+     f"**OpenStreetMap (`{env['mirror_used']}`):** `{env['road_cnt']} tuyến đường` (`{int(np.sum(env['road_mask'])):,} px`), "
+-    f"`{env['bld_cnt']} vùng công trình & {env['place_cnt']} điểm dân cư` (`{int(np.sum(env['building_mask'])):,} px`)"
++    f"`{env['bld_cnt']} vùng dân cư/landuse & {env['place_cnt']} điểm dân cư` (`{int(np.sum(env['building_mask'])):,} px`), "
++    f"`{int(np.sum(env['water_mask'])):,} px` mặt nước/biên biển được nhận diện | "
++    f"**DEM nguồn:** {env['dem_source']} | **Nhiên liệu nguồn:** {env['landcover_source']}"
+ )
++
++if env["landcover_coverage_pct"] == 0.0:
++    st.warning(
++        "⚠️ Chưa có GeoTIFF ESA WorldCover cục bộ. Mô hình đang dùng proxy nhiên liệu theo hướng phơi; "
++        "không diễn giải diện tích cháy hoặc hiệu quả đường băng như kết quả rừng thực tế. "
++        "Xem DATA_GUIDE.md để cài thảm phủ và DEM phù hợp."
++    )
++elif env["landcover_coverage_pct"] < 99.0:
++    st.warning(
++        f"Thảm phủ có độ phủ {env['landcover_coverage_pct']:.1f}%; kết quả cần xem như sơ bộ."
++    )
+ 
+ history_unctrl = results["history_uncontrolled"]
+ history_ctrl   = results["history_controlled"]
+@@ -2287,9 +2625,9 @@
+     )
+ with metric_row_1[2]:
+     st.metric(
+-        "Thời gian hành quân TB",
+-        f"{fm['TG Hành quân Tobler (giờ)']:.2f} giờ",
+-        f"Tốc độ TB: {env['walk_speed_kmh'].mean():.2f} km/h",
++        "Thời gian tiếp cận P90",
++        f"{fm['TG tiếp cận P90 (giờ)']:.2f} giờ" if isinstance(fm["TG tiếp cận P90 (giờ)"], (int, float, np.integer, np.floating)) else fm["TG tiếp cận P90 (giờ)"],
++        f"Tốc độ đi bộ tham chiếu TB: {env['walk_speed_kmh'].mean():.2f} km/h",
+     )
+ 
+ metric_row_2 = st.columns(3, gap="large")
+@@ -2334,7 +2672,7 @@
+         "Chiều dài 2D Phẳng (km)": "Dài 2D (km)",
+         "Độ dài Pixel (N×30m)": "Dài theo pixel (km)",
+         "Độ dốc TB / Max (°)": "Dốc TB / max",
+-        "TG Hành quân Tobler (giờ)": "Hành quân (h)",
++        "TG tiếp cận P90 (giờ)": "Tiếp cận P90 (h)",
+         "TG Lửa chạm (giờ)": "Lửa tới (h)",
+         "Quỹ TG Thi công (giờ)": "Quỹ thi công (h)",
+         "TG Đào theo Độ dốc (giờ)": "Thi công (h)",
+@@ -2376,22 +2714,28 @@
+ # ------------------------------------------------------------------------------
+ st.markdown("---")
+ st.subheader("F. Các Giả định Mô hình & Giới hạn Thực nghiệm (Assumptions & Limitations)")
++st.caption(
++    "Để dùng dữ liệu nghiên cứu độ phân giải cao: đặt DEM GeoTIFF trong thư mục data/dem/ "
++    "và ESA WorldCover 2021 v200 Map GeoTIFF trong data/worldcover/. Tệp hướng dẫn đi kèm "
++    "mô tả cách tải tile phù hợp cho từng vùng mẫu."
++)
+ 
+ st.markdown(
+     r"""
+     Để đảm bảo tính minh bạch khoa học, toàn bộ các thông số chưa được hiệu chuẩn trực tiếp tại hiện trường và các giới hạn của mô hình được tổng hợp tại đây:
+ 
+     * **1. Giả định về Hành quân & Tiếp cận Hậu cần (Logistics & Marching Assumptions):**
+-      * Thời gian di chuyển của lực lượng cứu hộ từ đường giao thông vào rừng được tích lũy trên đồ thị có hướng bằng thuật toán **Dijkstra siêu nguồn ảo** dựa trên **Hàm đi bộ thực nghiệm của Tobler (Tobler, 1993)**: $v(\theta) = 6.0 \cdot e^{-3.5\left\vert{}\tan\theta + 0.05\right\vert{}}$ (km/h) nhân với hệ số cản thực bì rừng $\eta_{\text{forest}} = 0.55$ và hiệu chỉnh chốt kiểm lâm tiền phương tại các vùng lõi rừng sâu.
+-      * Mô hình hiện chưa xét đến các chướng ngại vật thủy văn cục bộ (sông suối sâu không có cầu qua) ngoài mạng lưới đường OpenStreetMap.
++      * Thời gian di chuyển của lực lượng cứu hộ từ các ô đường OSM được tích lũy trên đồ thị có hướng bằng Dijkstra theo hàm Tobler (1993), nhân hệ số heuristic `eta_forest = 0.55`. Code hiện không có lớp vị trí trạm kiểm lâm hoặc đường mòn tuần tra độc lập.
++      * Đường sông/hồ được gán không cháy khi dữ liệu OSM hoặc WorldCover nhận diện được; khả năng đi bộ qua sông, cầu và chướng ngại thủy văn chưa được mô hình hóa đầy đủ.
+     * **2. Giả định về Định mức Phát quang & Độ khó theo Độ dốc - Hướng phơi (Clearing Productivity & Slope-Aspect Difficulty):**
+       * Năng suất cơ sở ở địa hình phẳng ($0^\circ$) được tham chiếu từ định mức trung bình của đội xung kích thủ công trong tài liệu **NWCG Fireline Handbook (PMS 410-1, USFS)** đối với thực bì cây bụi/rừng hỗn giao ($\approx 12\text{m dài / người / giờ}$, tương đương $2.5\text{ giờ công}$ cho mỗi đoạn $30\text{m}$).
+       * Khi độ dốc tăng qua 4 ngưỡng ($0^\circ-15^\circ, 15^\circ-25^\circ, 25^\circ-35^\circ, >35^\circ$), khối lượng giờ công tăng liên tục theo hàm mũ kết hợp hệ số giãn chiều dài mặt dốc $1/\cos\theta$, hướng phơi nắng `aspect_deg` và nhiệt độ `temp`. Định mức này **chưa được hiệu chuẩn bằng dữ liệu bấm giờ thực địa của Kiểm lâm Việt Nam** và chưa phân tách riêng trường hợp sử dụng xe ủi cơ giới.
+     * **3. Giả định về Lớp Phủ Thực bì & Vi khí hậu (Fuel & Micro-Climate Approximation):**
+-      * Do OpenStreetMap chưa cung cấp đầy đủ bản đồ phân loại sinh khối rừng chi tiết cho mọi tọa độ, hệ thống hiện điều biến mức độ dễ cháy của thực bì tự nhiên theo hướng phơi bức xạ mặt trời (`aspect_flammability` từ `0.84` ở sườn khuất nắng Đông-Bắc tới `1.16` ở sườn phơi nắng Tây-Nam), `fuel = 0.08` cho vùng dân cư và `fuel = 0.0` cho đường giao thông.
++      * Nếu có GeoTIFF ESA WorldCover 2021 v200 trong `data/worldcover/`, các lớp phủ được ánh xạ sang hệ số nhiên liệu tương đối theo heuristic: cây phủ, cây bụi, cỏ, đất canh tác và một số lớp đất ngập nước/thảm rừng ngập mặn. Đây không phải phép đo sinh khối hay độ ẩm nhiên liệu tại hiện trường. Nếu không có dữ liệu đó, hệ thống dùng proxy theo hướng phơi và kết quả chỉ phù hợp minh họa thuật toán, không dùng để kết luận diện tích rừng thực tế.
++      * Đường, khu dân cư và mặt nước được đặt nhiên liệu bằng `0.0`; trường Dijkstra liên tục chỉ tạo cạnh truyền lửa giữa các ô được phân loại là có thể cháy, thay vì nâng nhiên liệu bằng `np.clip` lên cận dương.
+     * **4. Giới hạn của Độ phân giải Dữ liệu API & Kiểm chứng Chặn lửa (API Resolution & Closed-Loop Scope):**
+-      * Dữ liệu độ cao lấy từ OpenTopoData SRTM 90m API được lấy mẫu trên lưới $20 \times 20$ và nội suy Bicubic lên lưới $540 \times 540$ ($\approx 30\text{m/pixel}$), phản ánh đúng địa thế sườn núi và thung lũng lớn nhưng có thể làm mượt các khe rãnh vi địa hình nhỏ dưới $50\text{m}$.
+-      * Kết quả giảm diện tích cháy là phép đối chứng giữa hai lượt chạy của mô hình Ô tự động (CA) đồng bộ số ngẫu nhiên chung (CRN); việc chặn được lửa phản ánh sự thỏa mãn quy tắc biên và kiểm định tô-pô 8 hướng trong không gian mô phỏng, chưa thay thế cho đánh giá an toàn hiện trường thực tế.
++      * Hệ thống ưu tiên GeoTIFF DEM cục bộ phủ kín vùng bản đồ. Nếu không có, nó truy vấn OpenTopoData SRTM90m tại 400 vị trí (lưới $20 \times 20$) rồi nội suy lên lưới tính toán $540 \times 540$. Khoảng cách điểm mẫu xấp xỉ 874 m trên khung này, nên đầu ra nội suy không thể được mô tả là dữ liệu độ cao thực 30 m và không bảo toàn vi địa hình.
++      * Kết quả diện tích cháy là phép đối chứng giữa hai lượt mô phỏng ghép cặp seed. CRN không bảo đảm tính đơn điệu: kịch bản có đường băng có thể cháy tăng ở một số vùng do trạng thái và thời điểm tiếp cận khác nhau. Kết quả động được đánh giá thêm sau mô phỏng, nhưng chưa thay thế cho kiểm định hoặc hiệu chuẩn ngoài thực địa.
+ 
+ 
+     * **5. Giới hạn của lập kế hoạch tuyến & nhân lực sau khi gia cố (Route/Workforce Guardrails):**

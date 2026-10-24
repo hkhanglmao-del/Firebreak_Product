@@ -1,0 +1,1 @@
+Đặt các tile DEM GeoTIFF phủ kín ROI tại đây. Xem HUONG_DAN_DU_LIEU_VA_KIEM_THU.md.

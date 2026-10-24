@@ -1,0 +1,1 @@
+Đặt các tile ESA WorldCover 2021 v200 lớp Map (GeoTIFF, giữ nguyên tên gốc) tại đây. Không đặt InputQuality.

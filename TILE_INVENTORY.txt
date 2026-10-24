@@ -1,0 +1,20 @@
+Firebreak current preset AOIs use a 0.15 x 0.15 degree bounding box centered at each REGION_PRESETS coordinate.
+
+Expected unique WorldCover 2021 v200 Map 3x3-degree tiles:
+  ESA_WorldCover_10m_2021_v200_N09E108_Map.tif
+  ESA_WorldCover_10m_2021_v200_N12E108_Map.tif
+  ESA_WorldCover_10m_2021_v200_N15E108_Map.tif
+  ESA_WorldCover_10m_2021_v200_N18E105_Map.tif
+  ESA_WorldCover_10m_2021_v200_N21E102_Map.tif
+  ESA_WorldCover_10m_2021_v200_N21E105_Map.tif
+
+Expected unique Copernicus DEM 1x1-degree grid tiles (GLO-30 first, GLO-90 fallback):
+  N11_00_E108_00
+  N12_00_E108_00
+  N16_00_E108_00
+  N18_00_E105_00
+  N20_00_E105_00
+  N21_00_E105_00
+  N22_00_E103_00
+
+These are derived from the region centers and ±0.075 degrees. The downloader checks ESA's official grid when available and the application/validator must still check raster content and coverage after download.
