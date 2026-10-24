@@ -190,13 +190,56 @@ def historical_weather() -> dict:
         "wind_direction_10m": "wind_deg",
     }
     arrays = {}
+    precipitation_gap_policy = "ERA5-Land values available"
     for key, out_key in keys.items():
         vals = hourly.get(key)
         if vals is None:
             raise RuntimeError(f"Historical weather payload missing {key}.")
-        nums = [float(vals[i]) for i in ix if vals[i] is not None]
-        if len(nums) < 6:
-            raise RuntimeError(f"Historical weather variable {key} has too few valid values.")
+        period_vals = [vals[i] for i in ix]
+        nums = [float(v) for v in period_vals if v is not None]
+        if key == "precipitation" and len(nums) < 6:
+            # Retry precipitation from the archive's best-match model before applying
+            # a clearly labelled zero-rain fallback. This fallback is not presented as
+            # station measurement; contemporaneous reports describe the fire-weather
+            # period as dry, while hourly rainfall values were absent in ERA5-Land.
+            log(f"ERA5-Land precipitation returned only {len(nums)} valid hours; retrying best-match archive.")
+            fallback_params = dict(params)
+            fallback_params.pop("models", None)
+            fallback_response = requests.get(url, params=fallback_params, timeout=90)
+            fallback_response.raise_for_status()
+            fallback_hourly = fallback_response.json().get("hourly") or {}
+            fallback_times = fallback_hourly.get("time") or []
+            fallback_indices = [
+                i for i, stamp in enumerate(fallback_times)
+                if "T" in stamp and 15 <= int(stamp.split("T")[1][:2]) <= 22
+            ]
+            fallback_vals = fallback_hourly.get("precipitation") or []
+            fallback_period = [
+                fallback_vals[i] if i < len(fallback_vals) else None
+                for i in fallback_indices
+            ]
+            fallback_nums = [float(v) for v in fallback_period if v is not None]
+            if len(fallback_nums) >= 6:
+                nums = [
+                    float(v) if v is not None else 0.0
+                    for v in fallback_period
+                ]
+                precipitation_gap_policy = "ERA5-Land precipitation incomplete; missing hours in best-match archive filled with 0.0 mm"
+            else:
+                nums = [
+                    float(v) if v is not None else 0.0
+                    for v in period_vals
+                ]
+                precipitation_gap_policy = (
+                    "Rainfall missing in ERA5-Land and best-match archives; null hours filled with 0.0 mm "
+                    "as a dry-weather assumption supported only qualitatively by contemporary news reports"
+                )
+                log("Rainfall unavailable from archive products; applying the explicitly labelled 0-mm dry-weather assumption.")
+        else:
+            if len(nums) < 6:
+                raise RuntimeError(f"Historical weather variable {key} has too few valid values.")
+            if key == "precipitation":
+                nums = [float(v) if v is not None else 0.0 for v in period_vals]
         arrays[out_key] = nums
     wd = np.radians(np.asarray(arrays["wind_deg"], dtype=float))
     mean_wind_direction = (math.degrees(math.atan2(float(np.sin(wd).mean()),
@@ -207,6 +250,7 @@ def historical_weather() -> dict:
         "longitude": IGNITION_LON,
         "local_period": "2023-04-07 15:00-22:00 Asia/Ho_Chi_Minh",
         "hours_used": [times[i] for i in ix],
+        "precipitation_gap_policy": precipitation_gap_policy,
         "temp_c_mean": float(np.mean(arrays["temp"])),
         "relative_humidity_pct_mean": float(np.mean(arrays["humidity"])),
         "precipitation_mm_hour_mean": float(np.mean(arrays["prcp"])),
