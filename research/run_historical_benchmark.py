@@ -303,20 +303,31 @@ def area_series_ha(history: np.ndarray, state_burning: int, state_burned: int,
 
 
 def build_benchmark_environment(ns: dict) -> tuple[dict, dict]:
-    """Build the app's standard environment from actual local DEM/WorldCover rasters.
+    """Build the standard environment from public DEM/WorldCover and sourced OSM layers.
 
-    OSM request failures were observed in the first CI attempt. This fallback deliberately
-    avoids inventing roads or settlements: those two masks are empty, while WorldCover
-    class 80 supplies mapped inland water. The resulting baseline spread run is usable as
-    a land-cover/terrain scale check, but its access and firebreak-planning results are not
-    an exact reproduction of the full OSM-enabled product.
+    The app first tries the official bounded OSM map endpoint, then its Overpass mirrors.
+    If both routes fail, empty road/building masks are an explicitly recorded fallback;
+    the burned-area baseline remains usable as a terrain/land-cover scale check, but the
+    access and firebreak-planning results must then be treated as provisional.
     """
     shape = ns["GRID_SHAPE"]
     dy_m, dx_m, pixel_area_ha = ns["compute_projected_pixel_scales"](LAT_CENTER)
 
-    road_mask = np.zeros(shape, dtype=bool)
-    building_mask = np.zeros(shape, dtype=bool)
-    initial_water = np.zeros(shape, dtype=bool)
+    osm_available = False
+    osm_source = ""
+    osm_error = None
+    try:
+        (
+            road_mask, building_mask, initial_water,
+            road_count, building_count, place_count, osm_source
+        ) = ns["fetch_api_osm_landscape"](LAT_CENTER, LON_CENTER)
+        osm_available = True
+    except Exception as exc:
+        road_mask = np.zeros(shape, dtype=bool)
+        building_mask = np.zeros(shape, dtype=bool)
+        initial_water = np.zeros(shape, dtype=bool)
+        road_count = building_count = place_count = 0
+        osm_error = str(exc)
 
     classes, water_mask, landcover_source, coverage = ns["load_local_worldcover_grid"](
         LAT_CENTER, LON_CENTER, initial_water
@@ -386,10 +397,10 @@ def build_benchmark_environment(ns: dict) -> tuple[dict, dict]:
         "dy_m": dy_m,
         "dx_m": dx_m,
         "pixel_area_ha": pixel_area_ha,
-        "road_cnt": 0,
-        "bld_cnt": 0,
-        "place_cnt": 0,
-        "mirror_used": "Not queried in fallback benchmark (Overpass timed out in full-app attempt)",
+        "road_cnt": int(road_count),
+        "bld_cnt": int(building_count),
+        "place_cnt": int(place_count),
+        "mirror_used": osm_source or "OSM unavailable; no road/building proxy invented",
     }
     metadata = {
         "dem_source": dem_source,
@@ -397,9 +408,20 @@ def build_benchmark_environment(ns: dict) -> tuple[dict, dict]:
         "worldcover_coverage_pct": float(coverage),
         "water_cells": int(water_mask.sum()),
         "burnable_cells": int((fuel_matrix > 0).sum()),
-        "road_mask_provided": False,
-        "building_mask_provided": False,
-        "note": "The app's existing fire-spread and planning functions run unchanged, but road/building masks are absent in this fallback benchmark.",
+        "osm_available": bool(osm_available),
+        "osm_source": osm_source or None,
+        "osm_error": osm_error,
+        "road_features": int(road_count),
+        "building_or_settlement_features": int(building_count),
+        "place_features": int(place_count),
+        "road_mask_provided": bool(osm_available),
+        "building_mask_provided": bool(osm_available),
+        "note": (
+            "OSM roads/buildings/water were loaded from the recorded source."
+            if osm_available else
+            "OSM sources were unavailable; no roads or buildings were fabricated. "
+            "Treat access times, route length, work-hours, and firebreak impact as provisional."
+        ),
     }
     return env, metadata
 
@@ -527,6 +549,12 @@ def main() -> None:
         "model_results": {
             "runtime_seconds": round(elapsed, 2),
             "initial_burned_area_ha": initial_area_ha,
+            "initial_burning_cells": int(curve[0]["burned_cells_model"]),
+            "chosen_ignition_seed_rc": list(result.get("chosen_ignition_seed_rc", ())),
+            "ignition_initialization_policy": (
+                "One ignition footprint only: the valid seed nearest the estimated origin is selected; "
+                "report-location uncertainty candidates are alternatives, not simultaneous fires."
+            ),
             "uncontrolled_burned_area_ha_after_6h": round(float(curve[min(12, len(curve) - 1)]["burned_area_ha_model"]), 4),
             "uncontrolled_burned_area_ha_after_8h": round(modeled_area, 4),
             "controlled_counterfactual_burned_area_ha_after_8h": round(controlled_area, 4),
