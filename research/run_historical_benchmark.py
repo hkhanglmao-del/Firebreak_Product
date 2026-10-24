@@ -452,6 +452,51 @@ def main() -> None:
     error_first = modeled_area - FIRST_EVENT_REFERENCE_HA
     error_total = modeled_area - MULTI_DAY_REFERENCE_HA
 
+    # Small, explicit in-sample sensitivity scan: keep the same DEM, WorldCover,
+    # weather and RNG seeds, but remove the artificial multi-candidate uncertainty cluster
+    # and vary only p_base. These are calibration candidates, NOT independent validation.
+    sensitivity = []
+    pbase_values = [0.12, 0.16, 0.20, 0.24, 0.28, 0.32, 0.38]
+    log("Running p_base sensitivity scan with a single ignition center and initial radius=2.")
+    for p_base_value in pbase_values:
+        scenario_params = dict(params)
+        scenario_params.update({
+            "uncertainty_px": 0,
+            "initial_radius": 2,
+            "p_base": p_base_value,
+            "sim_hours": 8,
+        })
+        scenario_start = time.time()
+        scenario = ns["run_full_simulation_and_mincut"](**scenario_params)
+        scenario_elapsed = time.time() - scenario_start
+        scenario_curve = area_series_ha(
+            scenario["history_uncontrolled"], ns["STATE_BURNING"],
+            ns["STATE_BURNED"], pixel_area_ha
+        )
+        area_at_6h = scenario_curve[min(12, len(scenario_curve) - 1)]["burned_area_ha_model"]
+        area_at_8h = scenario_curve[-1]["burned_area_ha_model"]
+        completion = scenario["final_metrics"].get("TG Đào theo Độ dốc (giờ)")
+        sensitivity.append({
+            "scenario": f"single ignition; radius=2 px; p_base={p_base_value:.2f}",
+            "p_base": p_base_value,
+            "uncertainty_px": 0,
+            "initial_radius_px": 2,
+            "initial_burned_area_ha": scenario_curve[0]["burned_area_ha_model"],
+            "modeled_area_ha_at_6h": float(area_at_6h),
+            "modeled_area_ha_at_8h": float(area_at_8h),
+            "absolute_error_vs_10ha_at_8h": abs(float(area_at_8h) - FIRST_EVENT_REFERENCE_HA),
+            "relative_error_vs_10ha_at_8h_pct": (
+                (float(area_at_8h) - FIRST_EVENT_REFERENCE_HA) / FIRST_EVENT_REFERENCE_HA * 100.0
+            ),
+            "controlled_area_ha_at_8h": float(scenario["controlled_burned_area_ha"]),
+            "firebreak_plan_accepted_by_model": bool(scenario["accepted"]),
+            "firebreak_completion_hours_model": scenario["final_metrics"].get("TG Đào theo Độ dốc (giờ)"),
+            "firebreak_status": str(scenario["status"]),
+            "runtime_seconds": round(scenario_elapsed, 3),
+        })
+        log(f"p_base={p_base_value:.2f}: 8h uncontrolled area={area_at_8h:.3f} ha; error vs ~10ha={float(area_at_8h)-FIRST_EVENT_REFERENCE_HA:+.3f} ha.")
+
+    best_scale_fit = min(sensitivity, key=lambda item: item["absolute_error_vs_10ha_at_8h"])
     # Report the observed/model area comparison as a scale check only.
     summary = {
         "benchmark_name": "Dalat Prenn Pass wildfire, 2023-04-07 initial 8-hour period",
@@ -488,6 +533,13 @@ def main() -> None:
             "firebreak_status": str(result["status"]),
             "final_metrics": result["final_metrics"],
             "burned_area_curve": curve,
+            "sensitivity_scan_single_origin_radius2": sensitivity,
+            "best_in_sample_scale_fit_vs_approx_10ha": best_scale_fit,
+            "interpretation": (
+                "Default uncertainty settings create a multi-center initial footprint. "
+                "The sensitivity scan is an in-sample scale fit to an approximate reported area, "
+                "not independent spatial validation."
+            ),
         },
         "historical_comparison": {
             "first_period_reported_area_ha_approx": FIRST_EVENT_REFERENCE_HA,
@@ -501,8 +553,10 @@ def main() -> None:
         "limitations": [
             "The ignition coordinate is an approximate Prenn Pass landmark, not a georeferenced fire origin.",
             "ERA5-Land is reanalysis weather, not a local station observation.",
-            "Weather is reduced to one constant mean vector for an 8-hour model window.",
-            "The first-event reference is reported as about 10 ha, not an independently digitized burn perimeter.",
+            "Weather is reduced to one constant mean vector for an 8-hour model window; this suppresses real hourly weather changes.",
+            "The first-event reference is reported as about 10 ha; comparing final area at 8h is only a rough scale comparison because the reported start/end timing and perimeter were not digitized.",
+            "The sensitivity scan uses the same event to choose a parameter value and therefore must be labelled in-sample calibration, not validation.",
+            "OSM Overpass timed out; this fallback run uses the real DEM and WorldCover but has no road/building masks. Firebreak access/planning output is therefore provisional, not a full product integration result.",
             "The 13.86 ha PlanetScope estimate covers a multi-day event with later flare-ups and is not directly equivalent to a single 8-hour simulated ignition.",
             "No georeferenced ground-truth perimeter was available; IoU, omission error and commission error cannot be computed.",
             "WorldCover 2021 is land-cover class data, not measured fuel load or moisture in April 2023.",
