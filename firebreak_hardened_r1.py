@@ -1653,6 +1653,31 @@ def _conservative_access_time_p90(access_times):
 
 
 @st.cache_data(show_spinner=False, ttl=1800, max_entries=4)
+def _safe_time_pressure_ratio(total_operation_time, fire_arrival_time):
+    """Tạo tỷ số áp lực thời gian hữu hạn, không để NaN đi vào đồ thị min-cut.
+
+    Các ô không thể tiếp cận có thể gây phép chia inf/inf. Những ô này được gán
+    mức áp lực tối đa và vẫn phải đi qua kiểm tra khả năng tiếp cận riêng.
+    """
+    operation, arrival = np.broadcast_arrays(
+        np.asarray(total_operation_time, dtype=np.float32),
+        np.asarray(fire_arrival_time, dtype=np.float32),
+    )
+    ratio = np.zeros_like(operation, dtype=np.float32)
+    both_finite = np.isfinite(operation) & np.isfinite(arrival)
+    np.divide(
+        operation,
+        np.maximum(0.35, arrival),
+        out=ratio,
+        where=both_finite,
+    )
+    ratio[~np.isfinite(operation)] = 3.0
+    return np.clip(
+        np.nan_to_num(ratio, nan=3.0, posinf=3.0, neginf=0.0),
+        0.0, 3.0
+    )
+
+
 def run_full_simulation_and_mincut(
     lat_center, lon_center,
     ign_row, ign_col, uncertainty_px, is_smoke_report, initial_radius, preburn_hours,
@@ -1896,7 +1921,7 @@ def run_full_simulation_and_mincut(
         & (~outer_guard_band)
     )
 
-    time_pressure_ratio = total_operation_time / np.maximum(0.35, fire_arrival_time)
+    time_pressure_ratio = _safe_time_pressure_ratio(total_operation_time, fire_arrival_time)
     pressure_penalty = 1.0 + 0.65 * np.clip(time_pressure_ratio, 0.0, 3.0) ** 2
 
     manpower_abundance = float(total_manpower) / 840.0
