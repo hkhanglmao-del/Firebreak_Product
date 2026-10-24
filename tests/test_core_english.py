@@ -25,6 +25,8 @@ FUNCTION_NAMES = {
     "load_local_worldcover_grid",
     "_conservative_access_time_p90",
     "fetch_api_osm_landscape",
+    "_osm_api_map_xml_to_elements",
+    "_build_single_ignition_mask",
     "compute_tobler_arrival_time",
     "compute_continuous_fire_arrival_field",
     "run_ca_step_vectorized",
@@ -355,3 +357,86 @@ def test_late_barrier_does_not_erase_existing_fire():
     )
     assert next_grid[3, 3] in (ns["STATE_BURNING"], ns["STATE_BURNED"])
     assert next_grid[3, 3] != ns["STATE_FIREBREAK"]
+
+
+def test_ignition_uncertainty_candidates_do_not_create_simultaneous_fires():
+    shape = (21, 21)
+    ns = make_namespace(shape)
+    env = env_for(shape)
+    single, single_seed = ns["_build_single_ignition_mask"](
+        [(10, 10)], 10, 10, 2, env
+    )
+    alternatives, chosen_seed = ns["_build_single_ignition_mask"](
+        [(10, 10), (6, 6), (14, 14), (10, 14)], 10, 10, 2, env
+    )
+    assert single_seed == chosen_seed == (10, 10)
+    assert np.array_equal(single, alternatives)
+    assert int(single.sum()) == 13  # one radius-2 disk, not a union of hypothetical origins
+
+
+def test_ignition_mask_excludes_water_buildings_roads_and_blocked_cells():
+    shape = (21, 21)
+    ns = make_namespace(shape)
+    env = env_for(shape)
+    env["water_mask"][10, 11] = True
+    env["building_mask"][11, 10] = True
+    env["road_mask"][9, 10] = True
+    blocked = np.zeros(shape, dtype=bool)
+    blocked[10, 9] = True
+    ignition, seed = ns["_build_single_ignition_mask"](
+        [(10, 10)], 10, 10, 2, env, blocked_mask=blocked
+    )
+    assert seed == (10, 10)
+    assert ignition[10, 10]
+    assert not ignition[10, 11]
+    assert not ignition[11, 10]
+    assert not ignition[9, 10]
+    assert not ignition[10, 9]
+
+
+def test_osm_map_xml_parser_retains_road_and_building_ways():
+    ns = make_namespace((9, 9))
+    payload = b'''<osm version="0.6">
+      <node id="1" lat="0.01" lon="-0.01" />
+      <node id="2" lat="0.01" lon="0.01" />
+      <node id="3" lat="-0.01" lon="0.01" />
+      <node id="4" lat="-0.01" lon="-0.01" />
+      <way id="10"><nd ref="1"/><nd ref="2"/><tag k="highway" v="primary"/></way>
+      <way id="20"><nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/><nd ref="1"/><tag k="building" v="yes"/></way>
+    </osm>'''
+    parsed = ns["_osm_api_map_xml_to_elements"](payload)
+    highway = next(el for el in parsed["elements"] if el.get("tags", {}).get("highway") == "primary")
+    building = next(el for el in parsed["elements"] if el.get("tags", {}).get("building") == "yes")
+    assert len(highway["geometry"]) == 2
+    assert len(building["geometry"]) == 5
+
+
+def test_osm_official_map_endpoint_fallback_rasterizes_roads_without_overpass():
+    ns = make_namespace((41, 41))
+    payload = b'''<osm version="0.6">
+      <node id="1" lat="0.03" lon="-0.03" />
+      <node id="2" lat="0.00" lon="0.00" />
+      <node id="3" lat="-0.03" lon="0.03" />
+      <way id="12"><nd ref="1"/><nd ref="2"/><nd ref="3"/><tag k="highway" v="primary"/></way>
+    </osm>'''
+
+    class Response:
+        content = payload
+        status_code = 200
+        def raise_for_status(self):
+            pass
+
+    class FakeRequests:
+        @staticmethod
+        def get(*args, **kwargs):
+            return Response()
+        @staticmethod
+        def post(*args, **kwargs):
+            raise AssertionError("Overpass should not be called when the official OSM API succeeds")
+
+    ns["requests"] = FakeRequests
+    road, building, water, road_count, *_ = ns["fetch_api_osm_landscape"](0.0, 0.0)
+    assert road.any()
+    assert road_count == 1
+    assert not building.any()
+    assert not water.any()
