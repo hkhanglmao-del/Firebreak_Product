@@ -469,6 +469,24 @@ def main() -> None:
     history = result["history_uncontrolled"]
     curve = area_series_ha(history, ns["STATE_BURNING"], ns["STATE_BURNED"], pixel_area_ha)
     initial_area_ha = curve[0]["burned_area_ha_model"]
+    initial_burning_cells = int(curve[0]["burned_cells_model"])
+    # Regression guard: with zero pre-burn time, initial cells must fit inside one
+    # radius-r disk. Location-uncertainty candidates must never inflate the footprint.
+    radius = max(0, int(params["initial_radius"]))
+    max_single_disk_cells = sum(
+        2 * int(math.floor(math.sqrt(radius * radius - dr * dr))) + 1
+        for dr in range(-radius, radius + 1)
+    )
+    single_origin_startup_check = {
+        "passed": params["preburn_hours"] > 0 or initial_burning_cells <= max_single_disk_cells,
+        "actual_initial_burning_cells": initial_burning_cells,
+        "maximum_cells_in_one_radius_disk": max_single_disk_cells,
+        "preburn_hours": params["preburn_hours"],
+    }
+    if not single_origin_startup_check["passed"]:
+        raise RuntimeError(
+            "Ignition initialization regression: initial burning footprint exceeds one radius disk."
+        )
     modeled_area = float(result["uncontrolled_burned_area_ha"])
     controlled_area = float(result["controlled_burned_area_ha"])
     error_first = modeled_area - FIRST_EVENT_REFERENCE_HA
@@ -549,7 +567,8 @@ def main() -> None:
         "model_results": {
             "runtime_seconds": round(elapsed, 2),
             "initial_burned_area_ha": initial_area_ha,
-            "initial_burning_cells": int(curve[0]["burned_cells_model"]),
+            "initial_burning_cells": initial_burning_cells,
+            "single_origin_startup_check": single_origin_startup_check,
             "chosen_ignition_seed_rc": list(result.get("chosen_ignition_seed_rc", ())),
             "ignition_initialization_policy": (
                 "One ignition footprint only: the valid seed nearest the estimated origin is selected; "
