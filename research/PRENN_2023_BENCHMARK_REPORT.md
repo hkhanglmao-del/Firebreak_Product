@@ -4,6 +4,8 @@
 **Code:** `firebreak_hardened_r1_english.py`, existing `run_full_simulation_and_mincut()` function  
 **Benchmark execution:** [GitHub Actions run](https://github.com/hkhanglmao-del/Firebreak_Product/actions/runs/40092705695)
 
+> **Superseded baseline — do not use the numbers below as the current result.** This report was written before the ignition-origin correction. The earlier run initialized simultaneous burning disks at multiple hypothetical origin candidates when location uncertainty was nonzero. The application now selects one valid candidate per realization. A refreshed benchmark is running on the corrected branch; results and CSV/JSON files must be regenerated before quoting model area metrics. The earlier run also omitted OSM road/building masks after Overpass timeouts; the updated runner now attempts the official OSM map API first and records whether it succeeded.
+
 ## Executive result
 
 The current default configuration overpredicts the reported area by a large margin on this retrospective scale check. It starts with **14.24 ha already burning**, grows to **31.35 ha at 6 hours** and **36.10 ha at 8 hours**. Contemporary reporting put the first Prenn Pass fire at approximately **10 ha**; a PlanetScope study estimated **13.86 ha for the multi-day 7–9 April event**. These reported values are approximate area references, not a georeferenced perimeter for direct pixel-by-pixel validation. [VnExpress, 8 April 2023](https://vnexpress.net/hon-10-ha-rung-thong-da-lat-bi-chay-4591076.html); [PlanetScope study](https://doi.org/10.55250/jo.vnuf.8.2.2023.097-106).
