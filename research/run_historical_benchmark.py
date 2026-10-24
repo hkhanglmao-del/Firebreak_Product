@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 import time
 import types
@@ -189,7 +190,7 @@ def historical_weather() -> dict:
         "wind_direction_10m": "wind_deg",
     }
     arrays = {}
-    precipitation_gap_policy = "ERA5-Land values available"
+    precipitation_gap_policy = "Open-Meteo archive values available (best-match model)"
     for key, out_key in keys.items():
         vals = hourly.get(key)
         if vals is None:
@@ -490,7 +491,7 @@ def main() -> None:
             ),
             "controlled_area_ha_at_8h": float(scenario["controlled_burned_area_ha"]),
             "firebreak_plan_accepted_by_model": bool(scenario["accepted"]),
-            "firebreak_completion_hours_model": scenario["final_metrics"].get("TG Đào theo Độ dốc (giờ)"),
+            "firebreak_completion_hours_model": (float(re.search(r"Completion time: ([0-9.]+)h", str(scenario["status"])).group(1)) if re.search(r"Completion time: ([0-9.]+)h", str(scenario["status"])) else None),
             "firebreak_status": str(scenario["status"]),
             "runtime_seconds": round(scenario_elapsed, 3),
         })
@@ -523,6 +524,7 @@ def main() -> None:
         "model_results": {
             "runtime_seconds": round(elapsed, 2),
             "initial_burned_area_ha": initial_area_ha,
+            "uncontrolled_burned_area_ha_after_6h": round(float(curve[min(12, len(curve) - 1)]["burned_area_ha_model"]), 4),
             "uncontrolled_burned_area_ha_after_8h": round(modeled_area, 4),
             "controlled_counterfactual_burned_area_ha_after_8h": round(controlled_area, 4),
             "gross_saved_area_ha_model": round(float(result["gross_saved_area_ha"]), 4),
@@ -534,7 +536,8 @@ def main() -> None:
             "final_metrics": result["final_metrics"],
             "burned_area_curve": curve,
             "sensitivity_scan_single_origin_radius2": sensitivity,
-            "best_in_sample_scale_fit_vs_approx_10ha": best_scale_fit,
+            "best_in_sample_scale_fit_vs_approx_10ha_at_8h": best_scale_fit,
+            "best_in_sample_scale_fit_vs_approx_10ha_at_6h": min(sensitivity, key=lambda item: abs(item["modeled_area_ha_at_6h"] - FIRST_EVENT_REFERENCE_HA)),
             "interpretation": (
                 "Default uncertainty settings create a multi-center initial footprint. "
                 "The sensitivity scan is an in-sample scale fit to an approximate reported area, "
@@ -543,7 +546,9 @@ def main() -> None:
         },
         "historical_comparison": {
             "first_period_reported_area_ha_approx": FIRST_EVENT_REFERENCE_HA,
-            "difference_model_minus_first_period_ha": round(error_first, 4),
+            "difference_model_minus_first_period_ha_at_8h": round(error_first, 4),
+            "difference_model_minus_first_period_ha_at_6h": round(float(curve[min(12, len(curve) - 1)]["burned_area_ha_model"]) - FIRST_EVENT_REFERENCE_HA, 4),
+            "relative_error_vs_first_period_at_6h_percent": round((float(curve[min(12, len(curve) - 1)]["burned_area_ha_model"]) - FIRST_EVENT_REFERENCE_HA) / FIRST_EVENT_REFERENCE_HA * 100.0, 2),
             "absolute_error_vs_first_period_ha": round(abs(error_first), 4),
             "relative_error_vs_first_period_percent": round(error_first / FIRST_EVENT_REFERENCE_HA * 100.0, 2),
             "PlanetScope_reported_area_ha_for_full_multiday_event": MULTI_DAY_REFERENCE_HA,
@@ -552,7 +557,7 @@ def main() -> None:
         },
         "limitations": [
             "The ignition coordinate is an approximate Prenn Pass landmark, not a georeferenced fire origin.",
-            "ERA5-Land is reanalysis weather, not a local station observation.",
+            "Open-Meteo historical archive weather is a model/reanalysis estimate, not a local station observation.",
             "Weather is reduced to one constant mean vector for an 8-hour model window; this suppresses real hourly weather changes.",
             "The first-event reference is reported as about 10 ha; comparing final area at 8h is only a rough scale comparison because the reported start/end timing and perimeter were not digitized.",
             "The sensitivity scan uses the same event to choose a parameter value and therefore must be labelled in-sample calibration, not validation.",
