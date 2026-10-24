@@ -5,7 +5,7 @@ Runs the current Firebreak R1 model function on a 540x540 grid using:
 - clipped public ESA WorldCover 2021 v200 COG tiles,
 - clipped public Copernicus GLO-30 COG tiles,
 - the application's own OSM landscape builder,
-- historical ERA5-Land hourly weather via the Open-Meteo Archive API.
+- hourly Open-Meteo Historical Weather Archive values (the API's default best-match model; not a local station series).
 
 This is a scale check against reported total area, not polygon-level validation:
 the original georeferenced burn perimeter and exact ignition coordinate are not
@@ -470,22 +470,35 @@ def main() -> None:
     curve = area_series_ha(history, ns["STATE_BURNING"], ns["STATE_BURNED"], pixel_area_ha)
     initial_area_ha = curve[0]["burned_area_ha_model"]
     initial_burning_cells = int(curve[0]["burned_cells_model"])
-    # Regression guard: with zero pre-burn time, initial cells must fit inside one
-    # radius-r disk. Location-uncertainty candidates must never inflate the footprint.
+    # Regression guard: when pre-burn time is zero, the initial fire footprint must
+    # fit within one circular radius-r disk. Uncertainty candidates are alternate
+    # possible origins; they must not be unioned into a multi-center starting fire.
     radius = max(0, int(params["initial_radius"]))
     max_single_disk_cells = sum(
         2 * int(math.floor(math.sqrt(radius * radius - dr * dr))) + 1
         for dr in range(-radius, radius + 1)
     )
+    initial_cells_reported_by_model = int(result.get("initial_burning_cells", initial_burning_cells))
+    zero_preburn = float(params["preburn_hours"]) == 0.0
     single_origin_startup_check = {
-        "passed": params["preburn_hours"] > 0 or initial_burning_cells <= max_single_disk_cells,
+        "status": (
+            "passed" if zero_preburn and initial_burning_cells <= max_single_disk_cells
+            else "not_applicable_due_to_preburn" if not zero_preburn
+            else "failed"
+        ),
+        "passed": bool(zero_preburn and initial_burning_cells <= max_single_disk_cells),
         "actual_initial_burning_cells": initial_burning_cells,
+        "initial_cells_reported_by_model": initial_cells_reported_by_model,
         "maximum_cells_in_one_radius_disk": max_single_disk_cells,
-        "preburn_hours": params["preburn_hours"],
+        "preburn_hours": float(params["preburn_hours"]),
     }
-    if not single_origin_startup_check["passed"]:
+    if zero_preburn and (
+        initial_burning_cells > max_single_disk_cells
+        or initial_burning_cells != initial_cells_reported_by_model
+    ):
         raise RuntimeError(
-            "Ignition initialization regression: initial burning footprint exceeds one radius disk."
+            "Ignition initialization regression: zero-preburn starting footprint "
+            "must fit in one disk and agree with the application's reported initial cell count."
         )
     modeled_area = float(result["uncontrolled_burned_area_ha"])
     controlled_area = float(result["controlled_burned_area_ha"])
@@ -589,8 +602,10 @@ def main() -> None:
             "best_in_sample_scale_fit_vs_approx_10ha_at_8h": best_scale_fit,
             "best_in_sample_scale_fit_vs_approx_10ha_at_6h": min(sensitivity, key=lambda item: item["absolute_error_vs_10ha_at_6h"]),
             "interpretation": (
-                "Default uncertainty settings create a multi-center initial footprint. "
-                "The sensitivity scan is an in-sample scale fit to an approximate reported area, "
+                "The current application selects one valid ignition seed per simulation; "
+                "location-uncertainty candidates are alternatives, not simultaneous fires. "
+                "The zero-preburn startup guard checks that the starting area fits in one radius-limited disk. "
+                "The p_base sensitivity scan is an in-sample scale-fit exercise against approximate reported area, "
                 "not independent spatial validation."
             ),
         },
@@ -611,7 +626,11 @@ def main() -> None:
             "Weather is reduced to one constant mean vector for an 8-hour model window; this suppresses real hourly weather changes.",
             "The first-event reference is reported as about 10 ha; comparing final area at 8h is only a rough scale comparison because the reported start/end timing and perimeter were not digitized.",
             "The sensitivity scan uses the same event to choose a parameter value and therefore must be labelled in-sample calibration, not validation.",
-            "OSM Overpass timed out; this fallback run uses the real DEM and WorldCover but has no road/building masks. Firebreak access/planning output is therefore provisional, not a full product integration result.",
+            (
+                "OSM roads/buildings/water were loaded from the recorded OSM source."
+                if environment_metadata["osm_available"] else
+                "OSM sources were unavailable during this run; the benchmark deliberately uses empty road/building masks rather than fabricating features. Firebreak access, route length, labor estimates, and containment outputs are provisional."
+            ),
             "The 13.86 ha PlanetScope estimate covers a multi-day event with later flare-ups and is not directly equivalent to a single 8-hour simulated ignition.",
             "No georeferenced ground-truth perimeter was available; IoU, omission error and commission error cannot be computed.",
             "WorldCover 2021 is land-cover class data, not measured fuel load or moisture in April 2023.",
@@ -625,14 +644,24 @@ def main() -> None:
     }
     out_path = OUT_DIR / "prenn_2023_benchmark.json"
     out_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    curve_path = OUT_DIR / "prenn_2023_area_curve.csv"
     import csv
+    curve_path = OUT_DIR / "prenn_2023_area_curve.csv"
     with curve_path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=list(curve[0].keys()))
         writer.writeheader()
         writer.writerows(curve)
-    print("BENCHMARK_RESULT_JSON=" + json.dumps(summary, ensure_ascii=False), flush=True)
-    log(f"Wrote {out_path.relative_to(ROOT)} and {curve_path.relative_to(ROOT)}.")
+
+    sensitivity_path = OUT_DIR / "prenn_2023_sensitivity.csv"
+    with sensitivity_path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(sensitivity[0].keys()))
+        writer.writeheader()
+        writer.writerows(sensitivity)
+
+    log("BENCHMARK_RESULT_JSON=" + json.dumps(summary, ensure_ascii=False))
+    log(
+        f"Wrote {out_path.relative_to(ROOT)}, {curve_path.relative_to(ROOT)}, "
+        f"and {sensitivity_path.relative_to(ROOT)}."
+    )
 
 
 if __name__ == "__main__":
