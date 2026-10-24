@@ -91,6 +91,13 @@ python -m streamlit run firebreak_hardened_r1.py
 
 Bộ test hiện tại có 9 kiểm thử tự động cho các hàm thuần được trích xuất từ ứng dụng: đọc đúng WorldCover Map, loại đường truyền Dijkstra qua ô không cháy, ngăn CA cắt góc qua vật cản, tránh xóa trạng thái cháy khi đường băng kích hoạt muộn, và kiểm tra điều kiện tiếp cận P90. Chúng **không** thay thế cho chạy thử toàn ứng dụng với API, kiểm tra trực quan năm vùng mẫu, benchmark 540×540, phân tích độ nhạy nhiều seed hoặc xác thực ngoài thực địa.
 
+## 5A. Hành vi cache và kiểm thử hồi quy mới
+
+- Ứng dụng lập khóa cache từ tên file, kích thước và thời điểm sửa đổi của các GeoTIFF trong `data/dem/` và `data/worldcover/`. Khi thêm, xóa hoặc cập nhật tile, khóa cache thay đổi để môi trường địa lý được nạp lại; không cần đưa raster lớn vào Git.
+- Các waterway OSM có tag `river`, `canal`, `stream` hoặc `riverbank` được raster hóa thành hành lang nước không cháy. Đối tượng dạng đường vẫn là proxy hẹp, không thay thế polygon mặt nước được lập bản đồ.
+- Bộ kiểm thử bao gồm các trường hợp cho từng tag waterway, kiểm tra ngăn đi chéo qua góc bị chặn trong kiểm định tô-pô, và kiểm tra invalidation khóa cache khi tập tile thay đổi.
+- Khi ước lượng chân trời lập kế hoạch từ mặt trận ban đầu, ô không cháy được (bao gồm nước và các lớp WorldCover có fuel bằng 0) không được tính là pixel phát quang.
+
 ## 6. Giới hạn còn tồn tại cần ghi trong báo cáo
 
 - Không có dữ liệu WorldCover thì fallback OSM thực vật không đầy đủ; vùng không được OSM gắn thẻ sẽ không được tự động coi là rừng. Đây là chế độ an toàn hơn việc giả định toàn bộ đất liền là rừng, nhưng có thể bỏ sót vùng nhiên liệu.

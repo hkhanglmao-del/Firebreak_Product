@@ -10,7 +10,7 @@ from pathlib import Path as FilePath
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from scipy.sparse.csgraph import dijkstra
+from scipy.sparse.csgraph import dijkstra, maximum_flow
 from scipy.ndimage import binary_dilation, distance_transform_edt, zoom, label
 from matplotlib.path import Path as MplPath
 
@@ -18,14 +18,19 @@ SOURCE_FILE = FilePath(__file__).resolve().parents[1] / "firebreak_hardened_r1.p
 TREE = ast.parse(SOURCE_FILE.read_text(encoding="utf-8"))
 FUNCTION_NAMES = {
     "draw_thick_line",
+    "_local_raster_inventory_signature",
+    "_solve_cropped_mincut",
     "_load_local_geotiff_grid",
     "load_local_dem_grid",
     "load_local_worldcover_grid",
     "_conservative_access_time_p90",
     "fetch_api_osm_landscape",
+    "_osm_api_map_xml_to_elements",
+    "_build_single_ignition_mask",
     "compute_tobler_arrival_time",
     "compute_continuous_fire_arrival_field",
     "run_ca_step_vectorized",
+    "_safe_time_pressure_ratio",
     "verify_topological_separation",
 }
 
@@ -35,6 +40,7 @@ def make_namespace(shape=(9, 9)):
         "np": np,
         "sp": sp,
         "dijkstra": dijkstra,
+        "maximum_flow": maximum_flow,
         "binary_dilation": binary_dilation,
         "distance_transform_edt": distance_transform_edt,
         "zoom": zoom,
@@ -54,6 +60,9 @@ def make_namespace(shape=(9, 9)):
         "_WEYL_OFFSETS": (0.0, 0.6180339, 0.2360679, 0.8541019,
                            0.4721359, 0.0901699, 0.7082039, 0.3262379),
         "OVERPASS_MIRRORS": ["https://overpass.test/api/interpreter"],
+        "LOCAL_DEM_DIR": FilePath("/unused-dem"),
+        "LOCAL_WORLDCOVER_DIR": FilePath("/unused-worldcover"),
+        "time": __import__("time"),
     }
     selected = [n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name in FUNCTION_NAMES]
     missing = FUNCTION_NAMES - {n.name for n in selected}
@@ -203,6 +212,109 @@ def test_osm_closed_water_polygon_is_returned_as_water_mask(monkeypatch):
     assert not building.any()
 
 
+
+@pytest.mark.parametrize("waterway", ["river", "canal", "stream", "riverbank"])
+def test_osm_open_waterway_is_returned_as_water_mask(waterway):
+    shape = (41, 41)
+    ns = make_namespace(shape)
+    geometry = [
+        {"lat": 0.03, "lon": -0.03},
+        {"lat": 0.00, "lon": 0.00},
+        {"lat": -0.03, "lon": 0.03},
+    ]
+    payload = {
+        "elements": [{
+            "type": "way", "id": 12,
+            "tags": {"waterway": waterway},
+            "geometry": geometry,
+        }]
+    }
+
+    class Response:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return payload
+
+    ns["requests"] = types.SimpleNamespace(post=lambda *args, **kwargs: Response())
+    road, building, water, *_ = ns["fetch_api_osm_landscape"](0.0, 0.0)
+    assert water.any(), f"OSM waterway={waterway!r} was not rasterized"
+    assert not road.any()
+    assert not building.any()
+
+
+def test_topology_verifier_does_not_cut_diagonal_corner_between_blocked_cells():
+    shape = (5, 5)
+    ns = make_namespace(shape)
+    source = np.zeros(shape, dtype=bool)
+    source[1, 1] = True
+    target = np.zeros(shape, dtype=bool)
+    target[2, 2] = True
+    # Only source and target are traversable. The direct diagonal must be rejected
+    # because both orthogonal side cells are blocked.
+    nonburnable = np.ones(shape, dtype=bool)
+    nonburnable[1, 1] = False
+
+    separated, leaked = ns["verify_topological_separation"](
+        source, target, np.zeros(shape, bool), np.zeros(shape, bool),
+        nonburnable_mask=nonburnable
+    )
+    assert separated
+    assert leaked == 0
+
+
+def test_local_raster_inventory_signature_changes_when_tiles_change(tmp_path):
+    ns = make_namespace((5, 5))
+    dem_dir = tmp_path / "dem"
+    wc_dir = tmp_path / "worldcover"
+    dem_dir.mkdir()
+    wc_dir.mkdir()
+    ns["LOCAL_DEM_DIR"] = dem_dir
+    ns["LOCAL_WORLDCOVER_DIR"] = wc_dir
+    signature_empty = ns["_local_raster_inventory_signature"]()
+
+    dem_tile = dem_dir / "sapa.tif"
+    dem_tile.write_bytes(b"dem-v1")
+    signature_dem = ns["_local_raster_inventory_signature"]()
+    assert signature_dem != signature_empty
+    assert ns["_local_raster_inventory_signature"]() == signature_dem
+
+    wc_tile = wc_dir / "worldcover.tif"
+    wc_tile.write_bytes(b"wc-v1")
+    signature_both = ns["_local_raster_inventory_signature"]()
+    assert signature_both != signature_dem
+
+    dem_tile.write_bytes(b"dem-v2-content")
+    signature_updated = ns["_local_raster_inventory_signature"]()
+    assert signature_updated != signature_both
+
+
+def test_cropped_mincut_returns_a_valid_source_side_partition():
+    shape = (9, 9)
+    ns = make_namespace(shape)
+    costs = np.ones(shape, dtype=np.float32)
+    # Make a cheap vertical cut so the max-flow/min-cut primitive has a small,
+    # deterministic synthetic case independent of real GIS data.
+    costs[:, 4] = 0.25
+    source = np.zeros(shape, dtype=bool)
+    source[4, 2] = True
+    sink = np.zeros(shape, dtype=bool)
+    sink[0, :] = True
+    sink[-1, :] = True
+    sink[:, 0] = True
+    sink[:, -1] = True
+
+    partition, sink_reached = ns["_solve_cropped_mincut"](
+        costs, source, sink, dx_m=30.0, dy_m=30.0,
+        diag_scale=float(np.hypot(30.0, 30.0) / 30.0)
+    )
+
+    assert sink_reached is False
+    assert partition.shape == shape
+    assert partition[source].all()
+    assert not partition[sink].any()
+    assert partition.any()
+
+
 def test_topology_verifier_treats_water_as_nonburnable():
     shape = (9, 9)
     ns = make_namespace(shape)
@@ -246,3 +358,99 @@ def test_late_barrier_does_not_erase_existing_fire():
     )
     assert next_grid[3, 3] in (ns["STATE_BURNING"], ns["STATE_BURNED"])
     assert next_grid[3, 3] != ns["STATE_FIREBREAK"]
+
+
+def test_ignition_uncertainty_candidates_do_not_create_simultaneous_fires():
+    shape = (21, 21)
+    ns = make_namespace(shape)
+    env = env_for(shape)
+    single, single_seed = ns["_build_single_ignition_mask"](
+        [(10, 10)], 10, 10, 2, env
+    )
+    alternatives, chosen_seed = ns["_build_single_ignition_mask"](
+        [(10, 10), (6, 6), (14, 14), (10, 14)], 10, 10, 2, env
+    )
+    assert single_seed == chosen_seed == (10, 10)
+    assert np.array_equal(single, alternatives)
+    assert int(single.sum()) == 13  # one radius-2 disk, not a union of hypothetical origins
+
+
+def test_ignition_mask_excludes_water_buildings_roads_and_blocked_cells():
+    shape = (21, 21)
+    ns = make_namespace(shape)
+    env = env_for(shape)
+    env["water_mask"][10, 11] = True
+    env["building_mask"][11, 10] = True
+    env["road_mask"][9, 10] = True
+    blocked = np.zeros(shape, dtype=bool)
+    blocked[10, 9] = True
+    ignition, seed = ns["_build_single_ignition_mask"](
+        [(10, 10)], 10, 10, 2, env, blocked_mask=blocked
+    )
+    assert seed == (10, 10)
+    assert ignition[10, 10]
+    assert not ignition[10, 11]
+    assert not ignition[11, 10]
+    assert not ignition[9, 10]
+    assert not ignition[10, 9]
+
+
+def test_osm_map_xml_parser_retains_road_and_building_ways():
+    ns = make_namespace((9, 9))
+    payload = b'''<osm version="0.6">
+      <node id="1" lat="0.01" lon="-0.01" />
+      <node id="2" lat="0.01" lon="0.01" />
+      <node id="3" lat="-0.01" lon="0.01" />
+      <node id="4" lat="-0.01" lon="-0.01" />
+      <way id="10"><nd ref="1"/><nd ref="2"/><tag k="highway" v="primary"/></way>
+      <way id="20"><nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/><nd ref="1"/><tag k="building" v="yes"/></way>
+      <way id="30"><nd ref="1"/><nd ref="2"/><tag k="landuse" v="forest"/></way>
+    </osm>'''
+    parsed = ns["_osm_api_map_xml_to_elements"](payload)
+    highway = next(el for el in parsed["elements"] if el.get("tags", {}).get("highway") == "primary")
+    building = next(el for el in parsed["elements"] if el.get("tags", {}).get("building") == "yes")
+    assert len(highway["geometry"]) == 2
+    assert len(building["geometry"]) == 5
+    assert not any(el.get("tags", {}).get("landuse") == "forest" for el in parsed["elements"])
+
+
+def test_osm_official_map_endpoint_fallback_rasterizes_roads_without_overpass():
+    ns = make_namespace((41, 41))
+    payload = b'''<osm version="0.6">
+      <node id="1" lat="0.03" lon="-0.03" />
+      <node id="2" lat="0.00" lon="0.00" />
+      <node id="3" lat="-0.03" lon="0.03" />
+      <way id="12"><nd ref="1"/><nd ref="2"/><nd ref="3"/><tag k="highway" v="primary"/></way>
+    </osm>'''
+
+    class Response:
+        content = payload
+        status_code = 200
+        def raise_for_status(self):
+            pass
+
+    class FakeRequests:
+        @staticmethod
+        def get(*args, **kwargs):
+            return Response()
+        @staticmethod
+        def post(*args, **kwargs):
+            raise AssertionError("Overpass should not be called when the official OSM API succeeds")
+
+    ns["requests"] = FakeRequests
+    road, building, water, road_count, *_ = ns["fetch_api_osm_landscape"](0.0, 0.0)
+    assert road.any()
+    assert road_count == 1
+    assert not building.any()
+    assert not water.any()
+
+
+def test_time_pressure_ratio_never_emits_nan_for_unreachable_cells():
+    ns = make_namespace((3, 3))
+    helper = ns["_safe_time_pressure_ratio"]
+    ratio = helper(
+        np.array([1.05, np.inf, 4.0, np.inf], dtype=np.float32),
+        np.array([2.0, np.inf, np.inf, 0.3], dtype=np.float32),
+    )
+    assert np.isfinite(ratio).all()
+    assert ratio.tolist() == pytest.approx([0.525, 3.0, 0.0, 3.0])

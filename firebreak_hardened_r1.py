@@ -351,6 +351,61 @@ def fetch_api_dem_grid(lat_center, lon_center, grid_n=20):
     return dem_540[:GRID_SHAPE[0], :GRID_SHAPE[1]]
 
 
+def _osm_api_map_xml_to_elements(xml_payload):
+    """Chuyển XML của endpoint OSM chính thức sang cấu trúc dữ liệu mà rasterizer sử dụng."""
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(xml_payload)
+    if root.tag.split("}")[-1] != "osm":
+        raise ValueError("Endpoint bản đồ OSM trả về XML không có thẻ gốc <osm>.")
+
+    node_lookup = {}
+    node_elements = []
+    for node in root.findall("node"):
+        node_id = node.attrib.get("id")
+        if node_id is None:
+            continue
+        tags = {tag.attrib.get("k", ""): tag.attrib.get("v", "") for tag in node.findall("tag")}
+        item = {
+            "type": "node",
+            "id": int(node_id),
+            "lat": float(node.attrib["lat"]),
+            "lon": float(node.attrib["lon"]),
+            "tags": tags,
+        }
+        node_lookup[node_id] = item
+        if "place" in tags:
+            node_elements.append(item)
+
+    elements = list(node_elements)
+    for way in root.findall("way"):
+        tags = {tag.attrib.get("k", ""): tag.attrib.get("v", "") for tag in way.findall("tag")}
+        requested_landuse = tags.get("landuse") in {
+            "residential", "commercial", "industrial", "retail", "village", "farmyard", "reservoir"
+        }
+        requested_natural = tags.get("natural") in {"water", "coastline"}
+        requested_waterway = tags.get("waterway") in {"riverbank", "river", "canal", "stream"}
+        requested_water = tags.get("water") in {"lake", "reservoir", "pond", "basin"}
+        if not (
+            "highway" in tags or "building" in tags
+            or requested_landuse or requested_natural or requested_waterway or requested_water
+        ):
+            continue
+        geometry = []
+        for nd in way.findall("nd"):
+            node = node_lookup.get(nd.attrib.get("ref", ""))
+            if node is not None:
+                geometry.append({"lat": node["lat"], "lon": node["lon"]})
+        if len(geometry) >= 2:
+            elements.append({
+                "type": "way",
+                "id": int(way.attrib.get("id", "0")),
+                "tags": tags,
+                "geometry": geometry,
+            })
+    return {"elements": elements}
+
+
 def fetch_api_osm_landscape(lat_center, lon_center):
     """
     Truy vấn trực tiếp 100% Đường giao thông & Khu dân cư từ OpenStreetMap Overpass API.
@@ -364,6 +419,7 @@ def fetch_api_osm_landscape(lat_center, lon_center):
     [out:json][timeout:25];
     (
       way["highway"~"motorway|trunk|primary|secondary|tertiary|unclassified|residential|service|track"]({south},{west},{north},{east});
+      way["building"]({south},{west},{north},{east});
       way["landuse"~"residential|commercial|industrial|retail|village|farmyard"]({south},{west},{north},{east});
       way["natural"="water"]({south},{west},{north},{east});
       way["natural"="coastline"]({south},{west},{north},{east});
@@ -384,23 +440,43 @@ def fetch_api_osm_landscape(lat_center, lon_center):
     used_mirror = ""
     last_err = None
 
-    for mirror in OVERPASS_MIRRORS:
-        try:
-            resp = requests.post(mirror, data={"data": query}, headers=headers, timeout=20)
-            if resp.status_code == 429:
-                last_err = f"429 Too Many Requests ({mirror})"
-                time.sleep(0.4)
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            used_mirror = mirror.split("//")[1].split("/")[0]
-            break
-        except Exception as e:
-            last_err = e
-            continue
+    # Ưu tiên endpoint bản đồ OSM chính thức trước; endpoint này trả về các way
+    # cùng node tham chiếu trong AOI giới hạn nên có thể thay thế Overpass.
+    try:
+        map_resp = requests.get(
+            "https://api.openstreetmap.org/api/0.6/map",
+            params={"bbox": f"{west},{south},{east},{north}"},
+            headers=headers,
+            timeout=15,
+        )
+        map_resp.raise_for_status()
+        data = _osm_api_map_xml_to_elements(map_resp.content)
+        used_mirror = "api.openstreetmap.org/map"
+    except Exception as e:
+        last_err = e
+        data = None
 
     if data is None:
-        raise RuntimeError(f"Tất cả máy chủ Overpass API hiện đang bận: {last_err}")
+        for mirror in OVERPASS_MIRRORS:
+            try:
+                resp = requests.post(mirror, data={"data": query}, headers=headers, timeout=10)
+                if resp.status_code == 429:
+                    last_err = f"429 Too Many Requests ({mirror})"
+                    time.sleep(0.4)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                used_mirror = mirror.split("//")[1].split("/")[0]
+                break
+            except Exception as e:
+                last_err = e
+                continue
+
+    if data is None:
+        raise RuntimeError(
+            "Endpoint bản đồ OSM chính thức và mọi máy chủ Overpass đều không khả dụng: "
+            f"{last_err}"
+        )
 
     road_mask = np.zeros(GRID_SHAPE, dtype=bool)
     building_mask = np.zeros(GRID_SHAPE, dtype=bool)
@@ -522,7 +598,7 @@ def fetch_api_osm_landscape(lat_center, lon_center):
                         coastline_water_seeds[sr, sc] = True
 
             elif (tags.get("natural") == "water"
-                  or tags.get("waterway") == "riverbank"
+                  or tags.get("waterway") in {"riverbank", "river", "canal", "stream"}
                   or tags.get("landuse") == "reservoir"
                   or tags.get("water") in {"lake", "reservoir", "pond", "basin"}):
                 # Closed water polygons are preferred; open mapped water features are rasterized
@@ -551,7 +627,7 @@ def fetch_api_osm_landscape(lat_center, lon_center):
                         (r0, c0), (r1, c1) = clipped
                         draw_thick_line(water_mask, r0, c0, r1, c1, thickness=1)
 
-            elif "landuse" in tags and len(pts) >= 3:
+            elif ("landuse" in tags or "building" in tags) and len(pts) >= 3:
                 poly_rc = clip_polygon_to_grid(pts)
                 if len(poly_rc) < 3:
                     continue
@@ -753,8 +829,24 @@ def compute_tobler_arrival_time(elevation, slope_deg, road_mask, dy_m, dx_m, wat
     return arrival_time, local_speed_kmh
 
 
+def _local_raster_inventory_signature():
+    """Stable cache key from local DEM/WorldCover file names, sizes, and modification times."""
+    inventory = []
+    for label, folder in (("dem", LOCAL_DEM_DIR), ("worldcover", LOCAL_WORLDCOVER_DIR)):
+        if not folder.exists():
+            continue
+        paths = sorted(set(folder.glob("*.tif")) | set(folder.glob("*.tiff")))
+        for path in paths:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            inventory.append((label, path.name, int(stat.st_size), int(stat.st_mtime_ns)))
+    return tuple(inventory)
+
+
 @st.cache_data(show_spinner=False, persist="disk", max_entries=6)
-def fetch_and_build_api_environment(lat_center, lon_center):
+def fetch_and_build_api_environment(lat_center, lon_center, data_signature):
     """Build static terrain/OSM layers; persistent cache permits reuse after restart.
 
     High-resolution local GeoTIFFs are preferred when present. Otherwise elevation falls
@@ -1041,6 +1133,10 @@ def verify_topological_separation(source_mask, target_mask, barrier_mask, road_m
         for dr, dc in neighbors_8:
             nr, nc = cr + dr, cc + dc
             if 0 <= nr < rows and 0 <= nc < cols:
+                if dr != 0 and dc != 0:
+                    # Match CA: a diagonal move is allowed only if both orthogonal side cells are passable.
+                    if blocked[cr, nc] or blocked[nr, cc]:
+                        continue
                 if not visited[nr, nc] and not blocked[nr, nc]:
                     visited[nr, nc] = True
                     queue_r.append(nr)
@@ -1142,6 +1238,46 @@ def compute_backcasted_ignition_seeds(
         est_origin_r, est_origin_c = int(nr), int(nc)
 
     return est_origin_r, est_origin_c, valid_seeds
+
+
+def _build_single_ignition_mask(
+    valid_seeds, origin_row, origin_col, initial_radius, env, blocked_mask=None
+):
+    """Tạo một vùng khởi phát duy nhất; các vị trí do sai số tọa độ là giả thuyết thay thế."""
+    if not valid_seeds:
+        raise ValueError("Không có ô khởi phát hợp lệ.")
+
+    fuel = np.asarray(env["fuel_matrix"], dtype=np.float32)
+    road = np.asarray(env["road_mask"], dtype=bool)
+    building = np.asarray(env["building_mask"], dtype=bool)
+    water = np.asarray(env.get("water_mask", np.zeros_like(road)), dtype=bool)
+    burnable = (fuel > 0.0) & (~road) & (~building) & (~water)
+    rows, cols = fuel.shape
+    seed = min(
+        ((int(r), int(c)) for r, c in valid_seeds),
+        key=lambda rc: ((rc[0] - float(origin_row)) ** 2 + (rc[1] - float(origin_col)) ** 2, rc[0], rc[1]),
+    )
+    sr, sc = seed
+    blocked = np.zeros_like(burnable) if blocked_mask is None else np.asarray(blocked_mask, dtype=bool)
+    if blocked.shape != burnable.shape:
+        raise ValueError("blocked_mask phải có cùng kích thước với lưới nhiên liệu.")
+    burnable &= ~blocked
+
+    ignition = np.zeros_like(burnable)
+    radius = max(0, int(initial_radius))
+    for dr in range(-radius, radius + 1):
+        for dc in range(-radius, radius + 1):
+            nr, nc = sr + dr, sc + dc
+            if 0 <= nr < rows and 0 <= nc < cols and dr * dr + dc * dc <= radius * radius:
+                if burnable[nr, nc]:
+                    ignition[nr, nc] = True
+
+    if not np.any(ignition):
+        raise ValueError(
+            "Vùng khởi phát đã chọn không còn ô cháy được sau khi áp dụng mặt nạ "
+            "đường, công trình, mặt nước và vùng loại trừ."
+        )
+    return ignition, seed
 
 
 def compute_continuous_fire_arrival_field(
@@ -1516,6 +1652,31 @@ def _conservative_access_time_p90(access_times):
     return float(np.percentile(values, 90)), True
 
 
+def _safe_time_pressure_ratio(total_operation_time, fire_arrival_time):
+    """Tạo tỷ số áp lực thời gian hữu hạn, không để NaN đi vào đồ thị min-cut.
+
+    Các ô không thể tiếp cận có thể gây phép chia inf/inf. Những ô này được gán
+    mức áp lực tối đa và vẫn phải đi qua kiểm tra khả năng tiếp cận riêng.
+    """
+    operation, arrival = np.broadcast_arrays(
+        np.asarray(total_operation_time, dtype=np.float32),
+        np.asarray(fire_arrival_time, dtype=np.float32),
+    )
+    ratio = np.zeros_like(operation, dtype=np.float32)
+    both_finite = np.isfinite(operation) & np.isfinite(arrival)
+    np.divide(
+        operation,
+        np.maximum(0.35, arrival),
+        out=ratio,
+        where=both_finite,
+    )
+    ratio[~np.isfinite(operation)] = 3.0
+    return np.clip(
+        np.nan_to_num(ratio, nan=3.0, posinf=3.0, neginf=0.0),
+        0.0, 3.0
+    )
+
+
 @st.cache_data(show_spinner=False, ttl=1800, max_entries=4)
 def run_full_simulation_and_mincut(
     lat_center, lon_center,
@@ -1523,7 +1684,7 @@ def run_full_simulation_and_mincut(
     wind_speed, wind_deg, humidity, prcp, temp,
     sim_hours, total_manpower, squad_size, p_base, allow_spotting
 ):
-    env = fetch_and_build_api_environment(lat_center, lon_center)
+    env = fetch_and_build_api_environment(lat_center, lon_center, _local_raster_inventory_signature())
     dy_m, dx_m, pixel_area_ha = env["dy_m"], env["dx_m"], env["pixel_area_ha"]
     diag_scale = float(np.hypot(dy_m, dx_m) / ((dy_m + dx_m) / 2.0))
     struct_8 = np.ones((3, 3), dtype=bool)
@@ -1548,19 +1709,12 @@ def run_full_simulation_and_mincut(
     grid_t0[env["fuel_matrix"] == 0.0] = STATE_EMPTY
     grid_t0[env["road_mask"]] = STATE_EMPTY
 
-    for sr, sc in valid_seeds:
-        for dr in range(-initial_radius, initial_radius + 1):
-            for dc in range(-initial_radius, initial_radius + 1):
-                nr, nc = sr + dr, sc + dc
-                if 0 <= nr < GRID_SHAPE[0] and 0 <= nc < GRID_SHAPE[1]:
-                    if dr**2 + dc**2 <= initial_radius**2:
-                        if (
-                            env["fuel_matrix"][nr, nc] > 0.0
-                            and not env["road_mask"][nr, nc]
-                            and not outer_guard_band[nr, nc]
-                        ):
-                            grid_t0[nr, nc] = STATE_BURNING
-                            burn_time_t0[nr, nc] = 1
+    initial_ignition_mask, chosen_ignition_seed = _build_single_ignition_mask(
+        valid_seeds, est_origin_r, est_origin_c, initial_radius, env,
+        blocked_mask=outer_guard_band
+    )
+    grid_t0[initial_ignition_mask] = STATE_BURNING
+    burn_time_t0[initial_ignition_mask] = 1
 
     if not np.any(grid_t0 == STATE_BURNING):
         # Never silently relocate the ignition to an arbitrary burnable cell.
@@ -1668,8 +1822,10 @@ def run_full_simulation_and_mincut(
         binary_dilation(current_fire_mask, structure=struct_8, iterations=1)
         & (~current_fire_mask)
         & (~outer_guard_band)
+        & (env["fuel_matrix"] > 0.0)
         & (~env["road_mask"])
         & (~env["building_mask"])
+        & (~env["water_mask"])
     )
     if np.any(initial_front):
         initial_work_pixels = int(np.sum(initial_front))
@@ -1765,7 +1921,7 @@ def run_full_simulation_and_mincut(
         & (~outer_guard_band)
     )
 
-    time_pressure_ratio = total_operation_time / np.maximum(0.35, fire_arrival_time)
+    time_pressure_ratio = _safe_time_pressure_ratio(total_operation_time, fire_arrival_time)
     pressure_penalty = 1.0 + 0.65 * np.clip(time_pressure_ratio, 0.0, 3.0) ** 2
 
     manpower_abundance = float(total_manpower) / 840.0
@@ -2082,6 +2238,8 @@ def run_full_simulation_and_mincut(
     gc.collect()
 
     return {
+        "chosen_ignition_seed_rc": tuple(map(int, chosen_ignition_seed)),
+        "initial_burning_cells": int(np.sum(history_uncontrolled[0] == STATE_BURNING)),
         "history_uncontrolled": history_uncontrolled,
         "history_controlled": history_controlled,
         "reduced_burn_mask": reduced_burn_mask,
@@ -2324,7 +2482,7 @@ try:
         f"Đang kết nối API tải Độ cao DEM, Đường giao thông/Dân cư OSM tại ({params['lat_center']:.4f}, {params['lon_center']:.4f}) "
         "và giải thuật toán Min-Cut 3D..."
     ):
-        env = fetch_and_build_api_environment(params["lat_center"], params["lon_center"])
+        env = fetch_and_build_api_environment(params["lat_center"], params["lon_center"], _local_raster_inventory_signature())
         results = run_full_simulation_and_mincut(**params)
 except Exception as run_err:
     st.error(

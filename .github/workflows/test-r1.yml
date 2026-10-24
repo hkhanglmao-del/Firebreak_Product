@@ -1,0 +1,28 @@
+name: Firebreak R1 regression tests
+
+on:
+  push:
+    branches:
+      - "audit/**"
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip numpy scipy matplotlib pytest rasterio
+      - name: Compile application and validator
+        run: python -m py_compile firebreak_hardened_r1.py firebreak_hardened_r1_english.py validate_firebreak_data.py
+      - name: Run regression suite
+        run: python -m pytest -q tests
