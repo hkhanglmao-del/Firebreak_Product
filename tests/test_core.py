@@ -403,12 +403,14 @@ def test_osm_map_xml_parser_retains_road_and_building_ways():
       <node id="4" lat="-0.01" lon="-0.01" />
       <way id="10"><nd ref="1"/><nd ref="2"/><tag k="highway" v="primary"/></way>
       <way id="20"><nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/><nd ref="1"/><tag k="building" v="yes"/></way>
+      <way id="30"><nd ref="1"/><nd ref="2"/><tag k="landuse" v="forest"/></way>
     </osm>'''
     parsed = ns["_osm_api_map_xml_to_elements"](payload)
     highway = next(el for el in parsed["elements"] if el.get("tags", {}).get("highway") == "primary")
     building = next(el for el in parsed["elements"] if el.get("tags", {}).get("building") == "yes")
     assert len(highway["geometry"]) == 2
     assert len(building["geometry"]) == 5
+    assert not any(el.get("tags", {}).get("landuse") == "forest" for el in parsed["elements"])
 
 
 def test_osm_official_map_endpoint_fallback_rasterizes_roads_without_overpass():
