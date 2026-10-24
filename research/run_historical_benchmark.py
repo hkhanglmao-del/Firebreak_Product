@@ -485,13 +485,17 @@ def main() -> None:
             "initial_burned_area_ha": scenario_curve[0]["burned_area_ha_model"],
             "modeled_area_ha_at_6h": float(area_at_6h),
             "modeled_area_ha_at_8h": float(area_at_8h),
+            "absolute_error_vs_10ha_at_6h": abs(float(area_at_6h) - FIRST_EVENT_REFERENCE_HA),
+            "relative_error_vs_10ha_at_6h_pct": (
+                (float(area_at_6h) - FIRST_EVENT_REFERENCE_HA) / FIRST_EVENT_REFERENCE_HA * 100.0
+            ),
             "absolute_error_vs_10ha_at_8h": abs(float(area_at_8h) - FIRST_EVENT_REFERENCE_HA),
             "relative_error_vs_10ha_at_8h_pct": (
                 (float(area_at_8h) - FIRST_EVENT_REFERENCE_HA) / FIRST_EVENT_REFERENCE_HA * 100.0
             ),
             "controlled_area_ha_at_8h": float(scenario["controlled_burned_area_ha"]),
             "firebreak_plan_accepted_by_model": bool(scenario["accepted"]),
-            "firebreak_completion_hours_model": (float(re.search(r"Completion time: ([0-9.]+)h", str(scenario["status"])).group(1)) if re.search(r"Completion time: ([0-9.]+)h", str(scenario["status"])) else None),
+            "firebreak_completion_hours_model": (float(re.search(r"Completion time: ([0-9.]+)\\s*h", str(scenario["status"])).group(1)) if re.search(r"Completion time: ([0-9.]+)\\s*h", str(scenario["status"])) else None),
             "firebreak_status": str(scenario["status"]),
             "runtime_seconds": round(scenario_elapsed, 3),
         })
@@ -537,7 +541,7 @@ def main() -> None:
             "burned_area_curve": curve,
             "sensitivity_scan_single_origin_radius2": sensitivity,
             "best_in_sample_scale_fit_vs_approx_10ha_at_8h": best_scale_fit,
-            "best_in_sample_scale_fit_vs_approx_10ha_at_6h": min(sensitivity, key=lambda item: abs(item["modeled_area_ha_at_6h"] - FIRST_EVENT_REFERENCE_HA)),
+            "best_in_sample_scale_fit_vs_approx_10ha_at_6h": min(sensitivity, key=lambda item: item["absolute_error_vs_10ha_at_6h"]),
             "interpretation": (
                 "Default uncertainty settings create a multi-center initial footprint. "
                 "The sensitivity scan is an in-sample scale fit to an approximate reported area, "
