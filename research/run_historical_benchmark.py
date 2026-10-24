@@ -302,11 +302,117 @@ def area_series_ha(history: np.ndarray, state_burning: int, state_burned: int,
     return output
 
 
+def build_benchmark_environment(ns: dict) -> tuple[dict, dict]:
+    """Build the app's standard environment from actual local DEM/WorldCover rasters.
+
+    OSM request failures were observed in the first CI attempt. This fallback deliberately
+    avoids inventing roads or settlements: those two masks are empty, while WorldCover
+    class 80 supplies mapped inland water. The resulting baseline spread run is usable as
+    a land-cover/terrain scale check, but its access and firebreak-planning results are not
+    an exact reproduction of the full OSM-enabled product.
+    """
+    shape = ns["GRID_SHAPE"]
+    dy_m, dx_m, pixel_area_ha = ns["compute_projected_pixel_scales"](LAT_CENTER)
+
+    road_mask = np.zeros(shape, dtype=bool)
+    building_mask = np.zeros(shape, dtype=bool)
+    initial_water = np.zeros(shape, dtype=bool)
+
+    classes, water_mask, landcover_source, coverage = ns["load_local_worldcover_grid"](
+        LAT_CENTER, LON_CENTER, initial_water
+    )
+    elevation, dem_source = ns["load_local_dem_grid"](
+        LAT_CENTER, LON_CENTER, water_mask
+    )
+    if elevation is None:
+        raise RuntimeError("Benchmark requires local DEM tiles; the model returned no DEM.")
+
+    dy, dx = np.gradient(elevation, dy_m, dx_m)
+    slope_rad = np.arctan(np.sqrt(dx ** 2 + dy ** 2))
+    slope_deg = np.degrees(slope_rad).astype(np.float32)
+    aspect_deg = (np.degrees(np.arctan2(-dx, dy)) % 360.0).astype(np.float32)
+    slope_sin = np.sin(np.radians(np.clip(slope_deg, 0.0, 60.0))).astype(np.float32)
+    aspect_flammability = (
+        1.0 + 0.16 * slope_sin * np.cos(np.radians(aspect_deg - 202.5))
+    ).astype(np.float32)
+
+    class_fuel = np.zeros(shape, dtype=np.float32)
+    class_fuel[classes == 10] = 1.00
+    class_fuel[classes == 20] = 0.82
+    class_fuel[classes == 30] = 0.58
+    class_fuel[classes == 40] = 0.28
+    class_fuel[classes == 90] = 0.12
+    class_fuel[classes == 95] = 0.90
+    class_fuel[classes == 100] = 0.10
+    fuel_matrix = class_fuel * aspect_flammability
+    fuel_matrix[water_mask] = 0.0
+    fuel_matrix[building_mask] = 0.0
+    fuel_matrix[road_mask] = 0.0
+
+    manpower_cost, difficulty_mult = ns["compute_slope_difficulty_and_manpower"](
+        slope_deg, road_mask, building_mask, aspect_deg=aspect_deg
+    )
+    arrival_time, walk_speed_kmh = ns["compute_tobler_arrival_time"](
+        elevation, slope_deg, road_mask, dy_m, dx_m,
+        water_mask=water_mask, building_mask=building_mask
+    )
+    ls = ns["LightSource"](azdeg=315, altdeg=42)
+    terrain_cmap = ns["LinearSegmentedColormap"].from_list(
+        "benchmark_terrain",
+        ["#1b3b22", "#26532b", "#3a6b33", "#658339", "#94994a", "#b5a36b", "#dcd3b2"]
+    )
+    hillshade_rgb = ls.shade(
+        elevation, cmap=terrain_cmap, vert_exag=2.0, blend_mode="soft"
+    )[..., :3].astype(np.float32)
+
+    env = {
+        "elevation": elevation,
+        "slope_deg": slope_deg,
+        "aspect_deg": aspect_deg,
+        "aspect_flammability": aspect_flammability,
+        "road_mask": road_mask,
+        "building_mask": building_mask,
+        "water_mask": water_mask,
+        "worldcover_classes": classes,
+        "landcover_source": landcover_source,
+        "landcover_coverage_pct": coverage,
+        "dem_source": dem_source,
+        "fuel_matrix": fuel_matrix,
+        "manpower_cost": manpower_cost,
+        "difficulty_mult": difficulty_mult,
+        "arrival_time": arrival_time,
+        "walk_speed_kmh": walk_speed_kmh,
+        "hillshade_rgb": hillshade_rgb,
+        "dy_m": dy_m,
+        "dx_m": dx_m,
+        "pixel_area_ha": pixel_area_ha,
+        "road_cnt": 0,
+        "bld_cnt": 0,
+        "place_cnt": 0,
+        "mirror_used": "Not queried in fallback benchmark (Overpass timed out in full-app attempt)",
+    }
+    metadata = {
+        "dem_source": dem_source,
+        "landcover_source": landcover_source,
+        "worldcover_coverage_pct": float(coverage),
+        "water_cells": int(water_mask.sum()),
+        "burnable_cells": int((fuel_matrix > 0).sum()),
+        "road_mask_provided": False,
+        "building_mask_provided": False,
+        "note": "The app's existing fire-spread and planning functions run unchanged, but road/building masks are absent in this fallback benchmark.",
+    }
+    return env, metadata
+
+
 def main() -> None:
     log("Preparing clipped public DEM and WorldCover tiles for the Dalat AOI.")
     data_inventory = prepare_geospatial_inputs()
     weather = historical_weather()
     ns = load_model_namespace()
+    benchmark_env, environment_metadata = build_benchmark_environment(ns)
+    # Route every environment lookup inside the model to the fixed benchmark environment.
+    # The CA / arrival-field / Min-Cut code itself is not reimplemented or replaced.
+    ns["fetch_and_build_api_environment"] = lambda lat, lon, *args, **kwargs: benchmark_env
 
     # Map the named Prenn Pass location to the app's 540x540 AOI grid.
     ign_row = int(round((NORTH - IGNITION_LAT) / LAT_SPAN_DEG * (ns["GRID_SHAPE"][0] - 1)))
@@ -346,8 +452,6 @@ def main() -> None:
     error_first = modeled_area - FIRST_EVENT_REFERENCE_HA
     error_total = modeled_area - MULTI_DAY_REFERENCE_HA
 
-    with rasterio.open(ROOT / "data" / "worldcover" / "ESA_WorldCover_10m_2021_v200_N09E108_Map.tif") as src_wc:
-        pass
     # Report the observed/model area comparison as a scale check only.
     summary = {
         "benchmark_name": "Dalat Prenn Pass wildfire, 2023-04-07 initial 8-hour period",
@@ -368,6 +472,7 @@ def main() -> None:
         "inputs": {
             "data_tiles": data_inventory,
             "weather": weather,
+            "environment": environment_metadata,
             "simulation": params,
         },
         "model_results": {
