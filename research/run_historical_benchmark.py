@@ -170,9 +170,8 @@ def historical_weather() -> dict:
         ),
         "timezone": "Asia/Ho_Chi_Minh",
         "wind_speed_unit": "ms",
-        "models": "era5_land",
     }
-    log("Requesting hourly ERA5-Land archive weather for 2023-04-07 15:00-22:00 local time.")
+    log("Requesting hourly Open-Meteo archive weather for 2023-04-07 15:00-22:00 local time.")
     response = requests.get(url, params=params, timeout=90)
     response.raise_for_status()
     payload = response.json()
@@ -201,8 +200,8 @@ def historical_weather() -> dict:
             # Retry precipitation from the archive's best-match model before applying
             # a clearly labelled zero-rain fallback. This fallback is not presented as
             # station measurement; contemporaneous reports describe the fire-weather
-            # period as dry, while hourly rainfall values were absent in ERA5-Land.
-            log(f"ERA5-Land precipitation returned only {len(nums)} valid hours; retrying best-match archive.")
+            # period as dry, while usable hourly rainfall values were absent in the archive.
+            log(f"Archive precipitation returned only {len(nums)} valid hours; retrying best-match archive.")
             fallback_params = dict(params)
             fallback_params.pop("models", None)
             fallback_response = requests.get(url, params=fallback_params, timeout=90)
@@ -224,17 +223,17 @@ def historical_weather() -> dict:
                     float(v) if v is not None else 0.0
                     for v in fallback_period
                 ]
-                precipitation_gap_policy = "ERA5-Land precipitation incomplete; missing hours in best-match archive filled with 0.0 mm"
+                precipitation_gap_policy = "Precipitation incomplete; missing hourly values filled with 0.0 mm"
             else:
                 nums = [
                     float(v) if v is not None else 0.0
                     for v in period_vals
                 ]
                 precipitation_gap_policy = (
-                    "Rainfall missing in ERA5-Land and best-match archives; null hours filled with 0.0 mm "
+                    "Rainfall missing in the hourly archive response; null hours filled with 0.0 mm "
                     "as a dry-weather assumption supported only qualitatively by contemporary news reports"
                 )
-                log("Rainfall unavailable from archive products; applying the explicitly labelled 0-mm dry-weather assumption.")
+                log("Rainfall unavailable from the archive; applying the explicitly labelled 0-mm dry-weather assumption.")
         else:
             if len(nums) < 6:
                 raise RuntimeError(f"Historical weather variable {key} has too few valid values.")
@@ -245,7 +244,7 @@ def historical_weather() -> dict:
     mean_wind_direction = (math.degrees(math.atan2(float(np.sin(wd).mean()),
                                                    float(np.cos(wd).mean()))) + 360.0) % 360.0
     weather = {
-        "source": "Open-Meteo Historical Weather API, ERA5-Land reanalysis",
+        "source": "Open-Meteo Historical Weather API default archive model; not a local station observation",
         "latitude": IGNITION_LAT,
         "longitude": IGNITION_LON,
         "local_period": "2023-04-07 15:00-22:00 Asia/Ho_Chi_Minh",
