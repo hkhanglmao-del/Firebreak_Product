@@ -1652,7 +1652,6 @@ def _conservative_access_time_p90(access_times):
     return float(np.percentile(values, 90)), True
 
 
-@st.cache_data(show_spinner=False, ttl=1800, max_entries=4)
 def _safe_time_pressure_ratio(total_operation_time, fire_arrival_time):
     """Tạo tỷ số áp lực thời gian hữu hạn, không để NaN đi vào đồ thị min-cut.
 
@@ -1678,6 +1677,7 @@ def _safe_time_pressure_ratio(total_operation_time, fire_arrival_time):
     )
 
 
+@st.cache_data(show_spinner=False, ttl=1800, max_entries=4)
 def run_full_simulation_and_mincut(
     lat_center, lon_center,
     ign_row, ign_col, uncertainty_px, is_smoke_report, initial_radius, preburn_hours,
