@@ -25,4 +25,4 @@ jobs:
       - name: Compile application and validator
         run: python -m py_compile firebreak_hardened_r1.py firebreak_hardened_r1_english.py validate_firebreak_data.py
       - name: Run regression suite
-        run: python -m pytest -q tests/test_core.py
+        run: python -m pytest -q tests
