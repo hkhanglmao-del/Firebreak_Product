@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
 import sys
 import time
 import types
@@ -476,7 +475,7 @@ def main() -> None:
         )
         area_at_6h = scenario_curve[min(12, len(scenario_curve) - 1)]["burned_area_ha_model"]
         area_at_8h = scenario_curve[-1]["burned_area_ha_model"]
-        completion = scenario["final_metrics"].get("TG Đào theo Độ dốc (giờ)")
+        completion = None
         sensitivity.append({
             "scenario": f"single ignition; radius=2 px; p_base={p_base_value:.2f}",
             "p_base": p_base_value,
@@ -495,7 +494,7 @@ def main() -> None:
             ),
             "controlled_area_ha_at_8h": float(scenario["controlled_burned_area_ha"]),
             "firebreak_plan_accepted_by_model": bool(scenario["accepted"]),
-            "firebreak_completion_hours_model": (float(re.search(r"Completion time: ([0-9.]+)\\s*h", str(scenario["status"])).group(1)) if re.search(r"Completion time: ([0-9.]+)\\s*h", str(scenario["status"])) else None),
+            "firebreak_completion_hours_model": (float(str(scenario["status"]).split("Completion time: ", 1)[1].split("h", 1)[0].strip()) if "Completion time: " in str(scenario["status"]) else None),
             "firebreak_status": str(scenario["status"]),
             "runtime_seconds": round(scenario_elapsed, 3),
         })
