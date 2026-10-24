@@ -1,0 +1,32 @@
+name: Historical wildfire benchmark
+
+on:
+  push:
+    branches:
+      - "audit/**"
+
+jobs:
+  prenn-2023-scale-check:
+    if: contains(github.event.head_commit.message, '[run-historical-benchmark]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install application and raster dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+      - name: Run historical scale-check using current Firebreak algorithm
+        run: python research/run_historical_benchmark.py
+      - name: Upload benchmark outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prenn-2023-firebreak-benchmark
+          path: benchmark-output/
+          if-no-files-found: warn
+          retention-days: 14
