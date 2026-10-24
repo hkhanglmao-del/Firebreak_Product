@@ -30,6 +30,7 @@ FUNCTION_NAMES = {
     "compute_tobler_arrival_time",
     "compute_continuous_fire_arrival_field",
     "run_ca_step_vectorized",
+    "_safe_time_pressure_ratio",
     "verify_topological_separation",
 }
 
@@ -442,3 +443,14 @@ def test_osm_official_map_endpoint_fallback_rasterizes_roads_without_overpass():
     assert road_count == 1
     assert not building.any()
     assert not water.any()
+
+
+def test_time_pressure_ratio_never_emits_nan_for_unreachable_cells():
+    ns = make_namespace((3, 3))
+    helper = ns["_safe_time_pressure_ratio"]
+    ratio = helper(
+        np.array([1.05, np.inf, 4.0, np.inf], dtype=np.float32),
+        np.array([2.0, np.inf, np.inf, 0.3], dtype=np.float32),
+    )
+    assert np.isfinite(ratio).all()
+    assert ratio.tolist() == pytest.approx([0.525, 3.0, 0.0, 3.0])
