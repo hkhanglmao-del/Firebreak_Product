@@ -1,0 +1,545 @@
+{
+  "benchmark_name": "Dalat Prenn Pass wildfire, 2023-04-07 initial 8-hour period",
+  "run_timestamp_utc": "2026-10-24T12:09:13.716465+00:00",
+  "source_code": "firebreak_hardened_r1_english.py; run_full_simulation_and_mincut()",
+  "source_code_branch": "audit/r1-validation-fixes-2026-10-24",
+  "method": "Existing Firebreak R1 cellular automaton + current Min-Cut planning workflow",
+  "aoi": {
+    "center_lat": 11.9404,
+    "center_lon": 108.4583,
+    "bounds_wsen": [
+      108.38329999999999,
+      11.865400000000001,
+      108.5333,
+      12.0154
+    ],
+    "grid_shape": [
+      540,
+      540
+    ],
+    "nominal_resolution_m": 30,
+    "pixel_area_ha": 0.09303965687147124,
+    "approximate_ignition_lat": 11.91667,
+    "approximate_ignition_lon": 108.45,
+    "grid_row": 355,
+    "grid_col": 240
+  },
+  "inputs": {
+    "data_tiles": [
+      {
+        "dataset": "ESA WorldCover 2021 v200 Map",
+        "tile": "N09E108",
+        "url": "https://esa-worldcover.s3.eu-central-1.amazonaws.com/v200/2021/map/ESA_WorldCover_10m_2021_v200_N09E108_Map.tif",
+        "status": "ok",
+        "output": "data/worldcover/ESA_WorldCover_10m_2021_v200_N09E108_Map.tif",
+        "shape": [
+          1616,
+          1801
+        ],
+        "bbox_intersection": [
+          108.38329999999999,
+          11.865400000000001,
+          108.5333,
+          12
+        ],
+        "crs": "EPSG:4326",
+        "nodata": 0,
+        "size_bytes": 260332
+      },
+      {
+        "dataset": "ESA WorldCover 2021 v200 Map",
+        "tile": "N12E108",
+        "url": "https://esa-worldcover.s3.eu-central-1.amazonaws.com/v200/2021/map/ESA_WorldCover_10m_2021_v200_N12E108_Map.tif",
+        "status": "ok",
+        "output": "data/worldcover/ESA_WorldCover_10m_2021_v200_N12E108_Map.tif",
+        "shape": [
+          185,
+          1801
+        ],
+        "bbox_intersection": [
+          108.38329999999999,
+          12,
+          108.5333,
+          12.0154
+        ],
+        "crs": "EPSG:4326",
+        "nodata": 0,
+        "size_bytes": 36713
+      },
+      {
+        "dataset": "Copernicus DEM GLO-30 DSM",
+        "tile": "N11E108",
+        "url": "https://copernicus-dem-30m.s3.eu-central-1.amazonaws.com/Copernicus_DSM_COG_10_N11_00_E108_00_DEM/Copernicus_DSM_COG_10_N11_00_E108_00_DEM.tif",
+        "status": "ok",
+        "output": "data/dem/benchmark_Copernicus_DSM_COG_10_N11_00_E108_00_DEM.tif",
+        "shape": [
+          486,
+          541
+        ],
+        "bbox_intersection": [
+          108.38329999999999,
+          11.865400000000001,
+          108.5333,
+          12.00013888888889
+        ],
+        "crs": "EPSG:4326",
+        "nodata": null,
+        "size_bytes": 840123
+      },
+      {
+        "dataset": "Copernicus DEM GLO-30 DSM",
+        "tile": "N12E108",
+        "url": "https://copernicus-dem-30m.s3.eu-central-1.amazonaws.com/Copernicus_DSM_COG_10_N12_00_E108_00_DEM/Copernicus_DSM_COG_10_N12_00_E108_00_DEM.tif",
+        "status": "ok",
+        "output": "data/dem/benchmark_Copernicus_DSM_COG_10_N12_00_E108_00_DEM.tif",
+        "shape": [
+          55,
+          541
+        ],
+        "bbox_intersection": [
+          108.38329999999999,
+          12.00013888888889,
+          108.5333,
+          12.0154
+        ],
+        "crs": "EPSG:4326",
+        "nodata": null,
+        "size_bytes": 96800
+      }
+    ],
+    "weather": {
+      "source": "Open-Meteo Historical Weather API default archive model; not a local station observation",
+      "latitude": 11.91667,
+      "longitude": 108.45,
+      "local_period": "2023-04-07 15:00-22:00 Asia/Ho_Chi_Minh",
+      "hours_used": [
+        "2023-04-07T15:00",
+        "2023-04-07T16:00",
+        "2023-04-07T17:00",
+        "2023-04-07T18:00",
+        "2023-04-07T19:00",
+        "2023-04-07T20:00",
+        "2023-04-07T21:00",
+        "2023-04-07T22:00"
+      ],
+      "precipitation_gap_policy": "Open-Meteo archive values available (best-match model)",
+      "temp_c_mean": 20.35,
+      "relative_humidity_pct_mean": 78.375,
+      "precipitation_mm_hour_mean": 0,
+      "wind_speed_ms_mean": 3.24,
+      "wind_direction_from_deg_circular_mean": 75.21414499172914,
+      "raw_hourly": {
+        "temperature_c": [
+          26.3,
+          24.6,
+          22.4,
+          19.7,
+          18.1,
+          17.5,
+          17.1,
+          17.1
+        ],
+        "relative_humidity_pct": [
+          40,
+          52,
+          68,
+          85,
+          96,
+          98,
+          97,
+          91
+        ],
+        "precipitation_mm": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "wind_speed_ms": [
+          4.3,
+          4.13,
+          4.01,
+          3.1,
+          2.62,
+          2.52,
+          2.62,
+          2.62
+        ],
+        "wind_direction_from_deg": [
+          90,
+          97,
+          94,
+          92,
+          72,
+          56,
+          50,
+          50
+        ]
+      }
+    },
+    "environment": {
+      "dem_source": "Local GeoTIFF: benchmark_Copernicus_DSM_COG_10_N11_00_E108_00_DEM.tif, benchmark_Copernicus_DSM_COG_10_N12_00_E108_00_DEM.tif",
+      "landcover_source": "ESA WorldCover 2021 v200: ESA_WorldCover_10m_2021_v200_N09E108_Map.tif, ESA_WorldCover_10m_2021_v200_N12E108_Map.tif",
+      "worldcover_coverage_pct": 100,
+      "water_cells": 4101,
+      "burnable_cells": 253831,
+      "road_mask_provided": false,
+      "building_mask_provided": false,
+      "note": "The app's existing fire-spread and planning functions run unchanged, but road/building masks are absent in this fallback benchmark."
+    },
+    "simulation": {
+      "lat_center": 11.9404,
+      "lon_center": 108.4583,
+      "ign_row": 355,
+      "ign_col": 240,
+      "uncertainty_px": 8,
+      "is_smoke_report": false,
+      "initial_radius": 3,
+      "preburn_hours": 0,
+      "wind_speed": 3.24,
+      "wind_deg": 75.21414499172914,
+      "humidity": 78.375,
+      "prcp": 0,
+      "temp": 20.35,
+      "sim_hours": 8,
+      "total_manpower": 150,
+      "squad_size": 20,
+      "p_base": 0.24,
+      "allow_spotting": true
+    }
+  },
+  "model_results": {
+    "runtime_seconds": 0.39,
+    "initial_burned_area_ha": 14.2351,
+    "uncontrolled_burned_area_ha_after_6h": 31.3544,
+    "uncontrolled_burned_area_ha_after_8h": 36.0994,
+    "controlled_counterfactual_burned_area_ha_after_8h": 36.0994,
+    "gross_saved_area_ha_model": 0,
+    "additional_burn_area_ha_model": 0,
+    "net_reduction_area_ha_model": 0,
+    "reduction_percent_model": 0,
+    "firebreak_plan_accepted_by_model": true,
+    "firebreak_status": "The plan satisfies the model constraints for this scenario (Buffer: 13 px | Completion time: 10.32 h | Time margin: +15.52 h)",
+    "final_metrics": {
+      "Buffer (px)": 13,
+      "Số Pixel": 264,
+      "Pixel thi công mới": 264,
+      "Chiều dài 3D Mặt dốc (km)": 8.45,
+      "Chiều dài 2D Phẳng (km)": 8.05,
+      "Độ dài Pixel (N×30m)": 7.92,
+      "Độ dốc TB / Max (°)": "15.1° / 34.4°",
+      "TG tiếp cận P90 (giờ)": 3.46,
+      "TG Lửa chạm (giờ)": 25.84,
+      "Quỹ TG Thi công (giờ)": 22.38,
+      "TG Đào theo Độ dốc (giờ)": 6.86,
+      "Khối lượng (Giờ công)": 1028.7,
+      "Kiểm định Tô-pô": "Pass (separated)",
+      "Trạng thái Ràng buộc": "Feasible"
+    },
+    "burned_area_curve": [
+      {
+        "hours_after_start": 0,
+        "burned_area_ha_model": 14.2351,
+        "burned_cells_model": 153
+      },
+      {
+        "hours_after_start": 0.5,
+        "burned_area_ha_model": 15.8167,
+        "burned_cells_model": 170
+      },
+      {
+        "hours_after_start": 1,
+        "burned_area_ha_model": 17.2123,
+        "burned_cells_model": 185
+      },
+      {
+        "hours_after_start": 1.5,
+        "burned_area_ha_model": 19.1662,
+        "burned_cells_model": 206
+      },
+      {
+        "hours_after_start": 2,
+        "burned_area_ha_model": 20.6548,
+        "burned_cells_model": 222
+      },
+      {
+        "hours_after_start": 2.5,
+        "burned_area_ha_model": 21.7713,
+        "burned_cells_model": 234
+      },
+      {
+        "hours_after_start": 3,
+        "burned_area_ha_model": 23.2599,
+        "burned_cells_model": 250
+      },
+      {
+        "hours_after_start": 3.5,
+        "burned_area_ha_model": 25.1207,
+        "burned_cells_model": 270
+      },
+      {
+        "hours_after_start": 4,
+        "burned_area_ha_model": 26.4233,
+        "burned_cells_model": 284
+      },
+      {
+        "hours_after_start": 4.5,
+        "burned_area_ha_model": 27.2606,
+        "burned_cells_model": 293
+      },
+      {
+        "hours_after_start": 5,
+        "burned_area_ha_model": 28.6562,
+        "burned_cells_model": 308
+      },
+      {
+        "hours_after_start": 5.5,
+        "burned_area_ha_model": 29.9588,
+        "burned_cells_model": 322
+      },
+      {
+        "hours_after_start": 6,
+        "burned_area_ha_model": 31.3544,
+        "burned_cells_model": 337
+      },
+      {
+        "hours_after_start": 6.5,
+        "burned_area_ha_model": 33.1221,
+        "burned_cells_model": 356
+      },
+      {
+        "hours_after_start": 7,
+        "burned_area_ha_model": 34.2386,
+        "burned_cells_model": 368
+      },
+      {
+        "hours_after_start": 7.5,
+        "burned_area_ha_model": 35.076,
+        "burned_cells_model": 377
+      },
+      {
+        "hours_after_start": 8,
+        "burned_area_ha_model": 36.0994,
+        "burned_cells_model": 388
+      }
+    ],
+    "sensitivity_scan_single_origin_radius2": [
+      {
+        "scenario": "single ignition; radius=2 px; p_base=0.12",
+        "p_base": 0.12,
+        "uncertainty_px": 0,
+        "initial_radius_px": 2,
+        "initial_burned_area_ha": 1.2095,
+        "modeled_area_ha_at_6h": 4.2798,
+        "modeled_area_ha_at_8h": 4.5589,
+        "absolute_error_vs_10ha_at_6h": 5.7202,
+        "relative_error_vs_10ha_at_6h_pct": -57.202,
+        "absolute_error_vs_10ha_at_8h": 5.4411,
+        "relative_error_vs_10ha_at_8h_pct": -54.411,
+        "controlled_area_ha_at_8h": 4.55894318670209,
+        "firebreak_plan_accepted_by_model": true,
+        "firebreak_completion_hours_model": 6.92,
+        "firebreak_status": "The plan satisfies the model constraints for this scenario (Buffer: 6 px | Completion time: 6.92 h | Time margin: +31.67 h)",
+        "runtime_seconds": 0.298
+      },
+      {
+        "scenario": "single ignition; radius=2 px; p_base=0.16",
+        "p_base": 0.16,
+        "uncertainty_px": 0,
+        "initial_radius_px": 2,
+        "initial_burned_area_ha": 1.2095,
+        "modeled_area_ha_at_6h": 4.745,
+        "modeled_area_ha_at_8h": 5.2102,
+        "absolute_error_vs_10ha_at_6h": 5.255,
+        "relative_error_vs_10ha_at_6h_pct": -52.55,
+        "absolute_error_vs_10ha_at_8h": 4.7898,
+        "relative_error_vs_10ha_at_8h_pct": -47.897999999999996,
+        "controlled_area_ha_at_8h": 5.21022078480239,
+        "firebreak_plan_accepted_by_model": true,
+        "firebreak_completion_hours_model": 7.37,
+        "firebreak_status": "The plan satisfies the model constraints for this scenario (Buffer: 8 px | Completion time: 7.37 h | Time margin: +23.36 h)",
+        "runtime_seconds": 0.302
+      },
+      {
+        "scenario": "single ignition; radius=2 px; p_base=0.20",
+        "p_base": 0.2,
+        "uncertainty_px": 0,
+        "initial_radius_px": 2,
+        "initial_burned_area_ha": 1.2095,
+        "modeled_area_ha_at_6h": 6.6989,
+        "modeled_area_ha_at_8h": 9.1179,
+        "absolute_error_vs_10ha_at_6h": 3.3011,
+        "relative_error_vs_10ha_at_6h_pct": -33.011,
+        "absolute_error_vs_10ha_at_8h": 0.8820999999999994,
+        "relative_error_vs_10ha_at_8h_pct": -8.820999999999994,
+        "controlled_area_ha_at_8h": 9.11788637340418,
+        "firebreak_plan_accepted_by_model": true,
+        "firebreak_completion_hours_model": 7.63,
+        "firebreak_status": "The plan satisfies the model constraints for this scenario (Buffer: 9 px | Completion time: 7.63 h | Time margin: +22.12 h)",
+        "runtime_seconds": 0.317
+      },
+      {
+        "scenario": "single ignition; radius=2 px; p_base=0.24",
+        "p_base": 0.24,
+        "uncertainty_px": 0,
+        "initial_radius_px": 2,
+        "initial_burned_area_ha": 1.2095,
+        "modeled_area_ha_at_6h": 7.9084,
+        "modeled_area_ha_at_8h": 11.0717,
+        "absolute_error_vs_10ha_at_6h": 2.0915999999999997,
+        "relative_error_vs_10ha_at_6h_pct": -20.915999999999997,
+        "absolute_error_vs_10ha_at_8h": 1.0716999999999999,
+        "relative_error_vs_10ha_at_8h_pct": 10.716999999999999,
+        "controlled_area_ha_at_8h": 11.071719167705078,
+        "firebreak_plan_accepted_by_model": true,
+        "firebreak_completion_hours_model": 8.92,
+        "firebreak_status": "The plan satisfies the model constraints for this scenario (Buffer: 11 px | Completion time: 8.92 h | Time margin: +17.62 h)",
+        "runtime_seconds": 0.338
+      },
+      {
+        "scenario": "single ignition; radius=2 px; p_base=0.28",
+        "p_base": 0.28,
+        "uncertainty_px": 0,
+        "initial_radius_px": 2,
+        "initial_burned_area_ha": 1.2095,
+        "modeled_area_ha_at_6h": 8.4666,
+        "modeled_area_ha_at_8h": 12.0952,
+        "absolute_error_vs_10ha_at_6h": 1.5334000000000003,
+        "relative_error_vs_10ha_at_6h_pct": -15.334000000000003,
+        "absolute_error_vs_10ha_at_8h": 2.0952,
+        "relative_error_vs_10ha_at_8h_pct": 20.952,
+        "controlled_area_ha_at_8h": 12.095155393291261,
+        "firebreak_plan_accepted_by_model": true,
+        "firebreak_completion_hours_model": 9.4,
+        "firebreak_status": "The plan satisfies the model constraints for this scenario (Buffer: 13 px | Completion time: 9.40 h | Time margin: +19.24 h)",
+        "runtime_seconds": 0.399
+      },
+      {
+        "scenario": "single ignition; radius=2 px; p_base=0.32",
+        "p_base": 0.32,
+        "uncertainty_px": 0,
+        "initial_radius_px": 2,
+        "initial_burned_area_ha": 1.2095,
+        "modeled_area_ha_at_6h": 10.2344,
+        "modeled_area_ha_at_8h": 15.0724,
+        "absolute_error_vs_10ha_at_6h": 0.23440000000000083,
+        "relative_error_vs_10ha_at_6h_pct": 2.3440000000000083,
+        "absolute_error_vs_10ha_at_8h": 5.0724,
+        "relative_error_vs_10ha_at_8h_pct": 50.724000000000004,
+        "controlled_area_ha_at_8h": 15.072424413178341,
+        "firebreak_plan_accepted_by_model": true,
+        "firebreak_completion_hours_model": 9.28,
+        "firebreak_status": "The plan satisfies the model constraints for this scenario (Buffer: 15 px | Completion time: 9.28 h | Time margin: +17.18 h)",
+        "runtime_seconds": 0.347
+      },
+      {
+        "scenario": "single ignition; radius=2 px; p_base=0.38",
+        "p_base": 0.38,
+        "uncertainty_px": 0,
+        "initial_radius_px": 2,
+        "initial_burned_area_ha": 1.2095,
+        "modeled_area_ha_at_6h": 13.3977,
+        "modeled_area_ha_at_8h": 21.213,
+        "absolute_error_vs_10ha_at_6h": 3.3977000000000004,
+        "relative_error_vs_10ha_at_6h_pct": 33.977000000000004,
+        "absolute_error_vs_10ha_at_8h": 11.213000000000001,
+        "relative_error_vs_10ha_at_8h_pct": 112.13000000000002,
+        "controlled_area_ha_at_8h": 21.213041766695444,
+        "firebreak_plan_accepted_by_model": true,
+        "firebreak_completion_hours_model": 9.54,
+        "firebreak_status": "The plan satisfies the model constraints for this scenario (Buffer: 16 px | Completion time: 9.54 h | Time margin: +14.11 h)",
+        "runtime_seconds": 0.358
+      }
+    ],
+    "best_in_sample_scale_fit_vs_approx_10ha_at_8h": {
+      "scenario": "single ignition; radius=2 px; p_base=0.20",
+      "p_base": 0.2,
+      "uncertainty_px": 0,
+      "initial_radius_px": 2,
+      "initial_burned_area_ha": 1.2095,
+      "modeled_area_ha_at_6h": 6.6989,
+      "modeled_area_ha_at_8h": 9.1179,
+      "absolute_error_vs_10ha_at_6h": 3.3011,
+      "relative_error_vs_10ha_at_6h_pct": -33.011,
+      "absolute_error_vs_10ha_at_8h": 0.8820999999999994,
+      "relative_error_vs_10ha_at_8h_pct": -8.820999999999994,
+      "controlled_area_ha_at_8h": 9.11788637340418,
+      "firebreak_plan_accepted_by_model": true,
+      "firebreak_completion_hours_model": 7.63,
+      "firebreak_status": "The plan satisfies the model constraints for this scenario (Buffer: 9 px | Completion time: 7.63 h | Time margin: +22.12 h)",
+      "runtime_seconds": 0.317
+    },
+    "best_in_sample_scale_fit_vs_approx_10ha_at_6h": {
+      "scenario": "single ignition; radius=2 px; p_base=0.32",
+      "p_base": 0.32,
+      "uncertainty_px": 0,
+      "initial_radius_px": 2,
+      "initial_burned_area_ha": 1.2095,
+      "modeled_area_ha_at_6h": 10.2344,
+      "modeled_area_ha_at_8h": 15.0724,
+      "absolute_error_vs_10ha_at_6h": 0.23440000000000083,
+      "relative_error_vs_10ha_at_6h_pct": 2.3440000000000083,
+      "absolute_error_vs_10ha_at_8h": 5.0724,
+      "relative_error_vs_10ha_at_8h_pct": 50.724000000000004,
+      "controlled_area_ha_at_8h": 15.072424413178341,
+      "firebreak_plan_accepted_by_model": true,
+      "firebreak_completion_hours_model": 9.28,
+      "firebreak_status": "The plan satisfies the model constraints for this scenario (Buffer: 15 px | Completion time: 9.28 h | Time margin: +17.18 h)",
+      "runtime_seconds": 0.347
+    },
+    "interpretation": "Default uncertainty settings create a multi-center initial footprint. The sensitivity scan is an in-sample scale fit to an approximate reported area, not independent spatial validation.",
+    "default_firebreak_completion_hours_model": 10.32
+  },
+  "historical_comparison": {
+    "first_period_reported_area_ha_approx": 10,
+    "difference_model_minus_first_period_ha_at_8h": 26.0994,
+    "difference_model_minus_first_period_ha_at_6h": 21.3544,
+    "relative_error_vs_first_period_at_6h_percent": 213.54,
+    "absolute_error_vs_first_period_ha": 26.0994,
+    "relative_error_vs_first_period_percent": 260.99,
+    "PlanetScope_reported_area_ha_for_full_multiday_event": 13.86,
+    "difference_model_minus_multiday_reference_ha_not_like_for_like": 22.2394,
+    "absolute_difference_vs_multiday_reference_ha_not_like_for_like": 22.2394
+  },
+  "limitations": [
+    "The ignition coordinate is an approximate Prenn Pass landmark, not a georeferenced fire origin.",
+    "Open-Meteo historical archive weather is a model/reanalysis estimate, not a local station observation.",
+    "Weather is reduced to one constant mean vector for an 8-hour model window; this suppresses real hourly weather changes.",
+    "The first-event reference is reported as about 10 ha; comparing final area at 8h is only a rough scale comparison because the reported start/end timing and perimeter were not digitized.",
+    "The sensitivity scan uses the same event to choose a parameter value and therefore must be labelled in-sample calibration, not validation.",
+    "OSM Overpass timed out; this fallback run uses the real DEM and WorldCover but has no road/building masks. Firebreak access/planning output is therefore provisional, not a full product integration result.",
+    "The 13.86 ha PlanetScope estimate covers a multi-day event with later flare-ups and is not directly equivalent to a single 8-hour simulated ignition.",
+    "No georeferenced ground-truth perimeter was available; IoU, omission error and commission error cannot be computed.",
+    "WorldCover 2021 is land-cover class data, not measured fuel load or moisture in April 2023.",
+    "This retrospective scale check is not validation for operational firefighting decisions."
+  ],
+  "references": [
+    "https://vnexpress.net/hon-10-ha-rung-thong-da-lat-bi-chay-4591076.html",
+    "https://journal.vnuf.edu.vn/en/article/download/103/57/110",
+    "https://mapcarta.com/15483576"
+  ],
+  "comparison_summary": {
+    "initial_area_ha": 14.2351,
+    "area_6h_ha": 31.3544,
+    "area_8h_ha": 36.0994,
+    "reference_first_event_ha": 10,
+    "initial_error_vs_10ha_pct": 42.350999999999985,
+    "error_6h_ha": 21.3544,
+    "error_6h_pct": 213.544,
+    "error_8h_ha": 26.099400000000003,
+    "error_8h_pct": 260.994,
+    "full_multiday_reference_ha": 13.86,
+    "difference_vs_multiday_ha": 22.239400000000003,
+    "difference_vs_multiday_pct": 160.4574314574315
+  },
+  "execution": {
+    "workflow_run_url": "https://github.com/hkhanglmao-del/Firebreak_Product/actions/runs/40092705695",
+    "job_url": "https://github.com/hkhanglmao-del/Firebreak_Product/actions/runs/40092705695/job/120868491500",
+    "benchmark_code_commit": "4da8d1959aee97bf7804d20d5d0afc9842e89a47",
+    "result_persisted_by": "research/results/ files in the audit branch"
+  }
+}
