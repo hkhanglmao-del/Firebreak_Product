@@ -18,6 +18,7 @@ SOURCE_FILE = FilePath(__file__).resolve().parents[1] / "firebreak_hardened_r1.p
 TREE = ast.parse(SOURCE_FILE.read_text(encoding="utf-8"))
 FUNCTION_NAMES = {
     "draw_thick_line",
+    "_local_raster_inventory_signature",
     "_load_local_geotiff_grid",
     "load_local_dem_grid",
     "load_local_worldcover_grid",
@@ -54,6 +55,9 @@ def make_namespace(shape=(9, 9)):
         "_WEYL_OFFSETS": (0.0, 0.6180339, 0.2360679, 0.8541019,
                            0.4721359, 0.0901699, 0.7082039, 0.3262379),
         "OVERPASS_MIRRORS": ["https://overpass.test/api/interpreter"],
+        "LOCAL_DEM_DIR": FilePath("/unused-dem"),
+        "LOCAL_WORLDCOVER_DIR": FilePath("/unused-worldcover"),
+        "time": __import__("time"),
     }
     selected = [n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name in FUNCTION_NAMES]
     missing = FUNCTION_NAMES - {n.name for n in selected}
@@ -201,6 +205,82 @@ def test_osm_closed_water_polygon_is_returned_as_water_mask(monkeypatch):
     assert water.sum() > 0
     assert not road.any()
     assert not building.any()
+
+
+
+@pytest.mark.parametrize("waterway", ["river", "canal", "stream", "riverbank"])
+def test_osm_open_waterway_is_returned_as_water_mask(waterway):
+    shape = (41, 41)
+    ns = make_namespace(shape)
+    geometry = [
+        {"lat": 0.03, "lon": -0.03},
+        {"lat": 0.00, "lon": 0.00},
+        {"lat": -0.03, "lon": 0.03},
+    ]
+    payload = {
+        "elements": [{
+            "type": "way", "id": 12,
+            "tags": {"waterway": waterway},
+            "geometry": geometry,
+        }]
+    }
+
+    class Response:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return payload
+
+    ns["requests"] = types.SimpleNamespace(post=lambda *args, **kwargs: Response())
+    road, building, water, *_ = ns["fetch_api_osm_landscape"](0.0, 0.0)
+    assert water.any(), f"OSM waterway={waterway!r} was not rasterized"
+    assert not road.any()
+    assert not building.any()
+
+
+def test_topology_verifier_does_not_cut_diagonal_corner_between_blocked_cells():
+    shape = (5, 5)
+    ns = make_namespace(shape)
+    source = np.zeros(shape, dtype=bool)
+    source[1, 1] = True
+    target = np.zeros(shape, dtype=bool)
+    target[2, 2] = True
+    # Only source and target are traversable. The direct diagonal must be rejected
+    # because both orthogonal side cells are blocked.
+    nonburnable = np.ones(shape, dtype=bool)
+    nonburnable[1, 1] = False
+
+    separated, leaked = ns["verify_topological_separation"](
+        source, target, np.zeros(shape, bool), np.zeros(shape, bool),
+        nonburnable_mask=nonburnable
+    )
+    assert separated
+    assert leaked == 0
+
+
+def test_local_raster_inventory_signature_changes_when_tiles_change(tmp_path):
+    ns = make_namespace((5, 5))
+    dem_dir = tmp_path / "dem"
+    wc_dir = tmp_path / "worldcover"
+    dem_dir.mkdir()
+    wc_dir.mkdir()
+    ns["LOCAL_DEM_DIR"] = dem_dir
+    ns["LOCAL_WORLDCOVER_DIR"] = wc_dir
+    signature_empty = ns["_local_raster_inventory_signature"]()
+
+    dem_tile = dem_dir / "sapa.tif"
+    dem_tile.write_bytes(b"dem-v1")
+    signature_dem = ns["_local_raster_inventory_signature"]()
+    assert signature_dem != signature_empty
+    assert ns["_local_raster_inventory_signature"]() == signature_dem
+
+    wc_tile = wc_dir / "worldcover.tif"
+    wc_tile.write_bytes(b"wc-v1")
+    signature_both = ns["_local_raster_inventory_signature"]()
+    assert signature_both != signature_dem
+
+    dem_tile.write_bytes(b"dem-v2-content")
+    signature_updated = ns["_local_raster_inventory_signature"]()
+    assert signature_updated != signature_both
 
 
 def test_topology_verifier_treats_water_as_nonburnable():
