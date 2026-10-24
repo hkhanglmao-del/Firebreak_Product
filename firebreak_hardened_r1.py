@@ -522,7 +522,7 @@ def fetch_api_osm_landscape(lat_center, lon_center):
                         coastline_water_seeds[sr, sc] = True
 
             elif (tags.get("natural") == "water"
-                  or tags.get("waterway") == "riverbank"
+                  or tags.get("waterway") in {"riverbank", "river", "canal", "stream"}
                   or tags.get("landuse") == "reservoir"
                   or tags.get("water") in {"lake", "reservoir", "pond", "basin"}):
                 # Closed water polygons are preferred; open mapped water features are rasterized
@@ -753,8 +753,24 @@ def compute_tobler_arrival_time(elevation, slope_deg, road_mask, dy_m, dx_m, wat
     return arrival_time, local_speed_kmh
 
 
+def _local_raster_inventory_signature():
+    """Stable cache key from local DEM/WorldCover file names, sizes, and modification times."""
+    inventory = []
+    for label, folder in (("dem", LOCAL_DEM_DIR), ("worldcover", LOCAL_WORLDCOVER_DIR)):
+        if not folder.exists():
+            continue
+        paths = sorted(set(folder.glob("*.tif")) | set(folder.glob("*.tiff")))
+        for path in paths:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            inventory.append((label, path.name, int(stat.st_size), int(stat.st_mtime_ns)))
+    return tuple(inventory)
+
+
 @st.cache_data(show_spinner=False, persist="disk", max_entries=6)
-def fetch_and_build_api_environment(lat_center, lon_center):
+def fetch_and_build_api_environment(lat_center, lon_center, data_signature):
     """Build static terrain/OSM layers; persistent cache permits reuse after restart.
 
     High-resolution local GeoTIFFs are preferred when present. Otherwise elevation falls
@@ -1041,6 +1057,10 @@ def verify_topological_separation(source_mask, target_mask, barrier_mask, road_m
         for dr, dc in neighbors_8:
             nr, nc = cr + dr, cc + dc
             if 0 <= nr < rows and 0 <= nc < cols:
+                if dr != 0 and dc != 0:
+                    # Match CA: a diagonal move is allowed only if both orthogonal side cells are passable.
+                    if blocked[cr, nc] or blocked[nr, cc]:
+                        continue
                 if not visited[nr, nc] and not blocked[nr, nc]:
                     visited[nr, nc] = True
                     queue_r.append(nr)
@@ -1523,7 +1543,7 @@ def run_full_simulation_and_mincut(
     wind_speed, wind_deg, humidity, prcp, temp,
     sim_hours, total_manpower, squad_size, p_base, allow_spotting
 ):
-    env = fetch_and_build_api_environment(lat_center, lon_center)
+    env = fetch_and_build_api_environment(lat_center, lon_center, _local_raster_inventory_signature())
     dy_m, dx_m, pixel_area_ha = env["dy_m"], env["dx_m"], env["pixel_area_ha"]
     diag_scale = float(np.hypot(dy_m, dx_m) / ((dy_m + dx_m) / 2.0))
     struct_8 = np.ones((3, 3), dtype=bool)
@@ -1668,8 +1688,10 @@ def run_full_simulation_and_mincut(
         binary_dilation(current_fire_mask, structure=struct_8, iterations=1)
         & (~current_fire_mask)
         & (~outer_guard_band)
+        & (env["fuel_matrix"] > 0.0)
         & (~env["road_mask"])
         & (~env["building_mask"])
+        & (~env["water_mask"])
     )
     if np.any(initial_front):
         initial_work_pixels = int(np.sum(initial_front))
@@ -2324,7 +2346,7 @@ try:
         f"Đang kết nối API tải Độ cao DEM, Đường giao thông/Dân cư OSM tại ({params['lat_center']:.4f}, {params['lon_center']:.4f}) "
         "và giải thuật toán Min-Cut 3D..."
     ):
-        env = fetch_and_build_api_environment(params["lat_center"], params["lon_center"])
+        env = fetch_and_build_api_environment(params["lat_center"], params["lon_center"], _local_raster_inventory_signature())
         results = run_full_simulation_and_mincut(**params)
 except Exception as run_err:
     st.error(
